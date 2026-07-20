@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-07-19] — DAN-577 Stage 2a: the four ADR-007 trust primitives (branch `et3rnald/dan-577-…`, PR-ready)
+
+- [feat] Origin vocabulary complete: `WriteOrigin` type (`local-mutation | query-response | sync-pull | hydration | rollback-replay | undo | agent`, open for `agent:*` identifiers) with the attribution-not-authentication caveat documented on the type. `hydration` stamped by persistence boot; `query-response` stamped by `writeEntitiesToStore`; ordinary write API still stamps nothing (`origin.spec.ts`).
+- [feat] Policy gate (audit blocker #4 placement): `createOptimisticUpdates(store).useGate(gate)` — synchronous `willApply` veto runs BEFORE `tx.set`/`tx.remove` touches the live store (no snapshot, no replay-log entry, no event, no disk); `willCommit` at commit time is last-chance over the full change set (with pre-transaction `previous` values) and its veto invokes the real rollback machinery — settles as rollback, disk untouched per 0.3. `PolicyVetoError` fail-visible on both paths; first veto wins; gates removable (`policy-gate.spec.ts`).
+- [feat] History store: `enableHistory(store, {maxEntries, maxBytes})` — field-level `{key, field, old→new, mutationId, origin, transactionId}` rows; remove/`clear()` PURGE retained rows (erasure/logout) leaving a data-free marker; `evict` excluded; dual bounds oldest-first, budget-honest on oversize rows; `createWriteIdGenerator` is the single seam Stage-3 HLC ids replace (`history.spec.ts`).
+- [feat] Schema export: `EntityDefinition` gains declared `description/fields/relations/local`; `exportSchema(entityDefs)` emits JSON-pure `{version, defaultIdField, entities}` with `getId`/`merge` as capability flags (`schema.spec.ts`). This export is the Stage-2c MCP resource input.
+- [chore] README + BATTLE-TESTED tense flip: ADR-007 primitives now truthfully SHIPPED (the AI-first audit's honesty bar); TinyBase netting explicitly not-adopted.
+- Verified: 186/186 tests, typecheck, build, lint — each commit. Four commits, one per scope item.
+
 ## [2026-07-19] — 0.3: optimistic writes never touch disk until commit (Phase 0 complete)
 
 - [fix] C3 + the fourth bug: `enablePersistence` is now transaction-aware — set/remove events carrying a `transactionId` buffer per-transaction (`pendingTx`), never entering the dirty sets; commit graduates the buffer's net effect into the normal write path, rollback discards it. Cold-entity corruption (partial optimistic data flushed over durable truth mid-debounce) and rollback's durable deletion of never-owned rows are both dead.

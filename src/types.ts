@@ -59,6 +59,38 @@ export type ResolveEntity<K extends string> = K extends keyof EntityRegistry
   : EntityRecord;
 
 /**
+ * The write-channel origin vocabulary (ADR-007 §1, enum amended per the
+ * 2026-07-12 council audit).
+ *
+ * - `local-mutation` — an optimistic transaction's write (user intent).
+ * - `query-response` — normalization of fetched server data (the most
+ *   common write; stamped by `writeEntitiesToStore`).
+ * - `sync-pull` — a sync adapter applying remote changes (Stage 3).
+ * - `hydration` — persistence restoring durable rows at boot.
+ * - `rollback-replay` — the transaction layer's compensating writes and
+ *   replays after a rollback (always paired with the owning transactionId).
+ * - `undo` — an undo/redo system reverting a change (reserved).
+ * - `agent` — an AI agent writing through an agent surface; agent origins
+ *   may carry an identifier suffix (e.g., `agent:assistant-1`), which is
+ *   why the type stays open beyond the known values.
+ *
+ * ⚠️ Origin is ATTRIBUTION within one trust domain, not AUTHENTICATION.
+ * Any code with a store reference can call `runWith` — the channel makes
+ * origins unforgeable through the ordinary write API (set/remove never
+ * accept one), not against a hostile caller in the same JS realm.
+ * Receipts and audit layers built on origins inherit this caveat.
+ */
+export type WriteOrigin =
+  | "local-mutation"
+  | "query-response"
+  | "sync-pull"
+  | "hydration"
+  | "rollback-replay"
+  | "undo"
+  | "agent"
+  | (string & {});
+
+/**
  * Event emitted when the entity store changes.
  * When the entity type is registered in `EntityRegistry`, `data` and
  * `previousData` are typed accordingly.
@@ -104,10 +136,12 @@ export interface EntityEvent<T extends EntityRecord = EntityRecord> {
    * `store.runWith({ origin }, fn)` — never passed by ordinary callers, so
    * privileged origins (`hydration`, `sync-pull`) can't be forged through
    * the public write API. Attribution within one trust domain, not
-   * authentication. Values today: `local-mutation` and `rollback-replay`
-   * (stamped by the transaction layer); the full enum lands with Stage 2a.
+   * authentication — see {@link WriteOrigin} for the vocabulary and the
+   * full caveat. Stamped today: `local-mutation`, `rollback-replay`
+   * (transaction layer), `hydration` (persistence boot), `query-response`
+   * (normalization writes).
    */
-  origin?: string;
+  origin?: WriteOrigin;
   /**
    * Groups the writes of one optimistic transaction. Stamped by the
    * transaction layer via `runWith`. Downstream layers use it to hold
@@ -119,7 +153,7 @@ export interface EntityEvent<T extends EntityRecord = EntityRecord> {
 
 /** Write-channel metadata applied to events emitted inside `runWith`. */
 export interface WriteMeta {
-  origin?: string;
+  origin?: WriteOrigin;
   transactionId?: string;
 }
 
@@ -466,6 +500,35 @@ export interface EntityDefinition<T extends EntityRecord = EntityRecord> {
    * })
    */
   merge?: (existing: T, incoming: T) => T;
+
+  // ── Declared schema metadata (ADR-007 §4) ──────────────────────────
+  // TypeScript types are erased at runtime, so a machine-legible schema
+  // (devtools, docs generation, the MCP agent surface) can only export
+  // what is DECLARED here. All optional — undeclared types still export
+  // a minimal entry.
+
+  /** Human/agent-readable description of this entity type. */
+  description?: string;
+
+  /**
+   * Declared field types — a JSON-ish vocabulary (`"string"`, `"number"`,
+   * `"boolean"`, `"object"`, `"array"`, or any domain word you choose);
+   * the export passes it through verbatim.
+   */
+  fields?: Record<string, string | { type: string; description?: string }>;
+
+  /**
+   * Declared relations: which fields hold EntityRefs to other types.
+   * `many: true` marks array-of-refs fields.
+   */
+  relations?: Record<string, { entity: string; many?: boolean; description?: string }>;
+
+  /**
+   * Local-only flag: this type never syncs to a server (device state,
+   * drafts, UI preferences). Consumed by Stage-3 sync and surfaced to
+   * agents so they know what leaves the device.
+   */
+  local?: boolean;
 }
 
 /**

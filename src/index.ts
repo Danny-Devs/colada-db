@@ -34,12 +34,28 @@ export { sqliteEngine } from "./engines/sqlite";
 export type { SqliteEngine, SqliteEngineOptions } from "./engines/sqlite";
 
 // ─── Optimistic transactions ───
-export { createOptimisticUpdates } from "./transactions";
+export { createOptimisticUpdates, PolicyVetoError } from "./transactions";
 export type {
   OptimisticTransaction,
   OptimisticUpdates,
   TransactionSettledEvent,
+  PolicyGate,
+  ProposedWrite,
+  GateVerdict,
 } from "./transactions";
+
+// ─── Schema export (machine-legible registry, ADR-007 §4) ───
+export { exportSchema } from "./schema";
+export type {
+  ColadaDbSchema,
+  ExportedEntitySchema,
+  ExportedField,
+  ExportedRelation,
+} from "./schema";
+
+// ─── History (capped field-level change log, ADR-007 §3) ───
+export { enableHistory, createWriteIdGenerator } from "./history";
+export type { HistoryStore, HistoryEntry, HistoryOptions } from "./history";
 
 // ─── Real-time coalescing ───
 export { createCoalescer } from "./coalesce";
@@ -61,4 +77,6 @@ export type {
   EntityDefinition,
   EntityRef,
   NormalizationResult,
+  WriteOrigin,
+  WriteMeta,
 } from "./types";

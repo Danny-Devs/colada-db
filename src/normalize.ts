@@ -45,18 +45,25 @@ export function writeEntitiesToStore(
     (e) => !entityDefs[e.entityType]?.merge,
   );
 
-  if (regularEntities.length > 0) {
-    store.setMany(regularEntities);
-  }
-  for (const entity of customMergeEntities) {
-    const mergeFn = entityDefs[entity.entityType].merge!;
-    // Atomic read-modify-write: the merge runs inside the store so an
-    // interleaved write (sync loop, async backend) can't land between the
-    // read and the write and get silently lost.
-    store.update(entity.entityType, entity.id, (existing) =>
-      existing ? mergeFn(existing, entity.data) : entity.data,
-    );
-  }
+  // Stamped `query-response` (ADR-007 §1): normalization of fetched server
+  // data is the most common write path, and this function IS its channel.
+  // A coordinator that writes normalized data under a different authority
+  // (e.g., a Stage-3 sync adapter) uses its own store writes under its own
+  // origin rather than routing through this stamp.
+  store.runWith({ origin: "query-response" }, () => {
+    if (regularEntities.length > 0) {
+      store.setMany(regularEntities);
+    }
+    for (const entity of customMergeEntities) {
+      const mergeFn = entityDefs[entity.entityType].merge!;
+      // Atomic read-modify-write: the merge runs inside the store so an
+      // interleaved write (sync loop, async backend) can't land between the
+      // read and the write and get silently lost.
+      store.update(entity.entityType, entity.id, (existing) =>
+        existing ? mergeFn(existing, entity.data) : entity.data,
+      );
+    }
+  });
 }
 
 // ─────────────────────────────────────────────
