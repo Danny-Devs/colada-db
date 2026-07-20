@@ -1,0 +1,44 @@
+/**
+ * colada-db — AI-first, local-first client database.
+ *
+ * The engine: a normalized reactive entity store (synchronous read
+ * projection) over pluggable write-behind durability engines
+ * (in-memory, IndexedDB, OPFS SQLite).
+ *
+ * Framework adapters live in separate packages; the first is
+ * `pinia-colada-plugin-normalizer` (Vue / Pinia Colada).
+ */
+
+// ─── Entity store ───
+export { createEntityStore } from "./store";
+
+// ─── Persistence (write-behind wiring over a StorageEngine) ───
+export { enablePersistence } from "./persist";
+export type { PersistenceOptions, PersistenceHandle } from "./persist";
+
+// ─── Durability engines ───
+export { idbEngine } from "./engines/idb";
+export type { IdbEngineOptions } from "./engines/idb";
+export { memoryEngine } from "./engines/memory";
+export type { MemoryEngine } from "./engines/memory";
+export { sqliteEngine } from "./engines/sqlite";
+export type { SqliteEngine, SqliteEngineOptions } from "./engines/sqlite";
+
+// ─── Pagination merge recipes ───
+export { cursorPagination, offsetPagination, relayPagination } from "./pagination";
+export type { RelayPageInfo } from "./pagination";
+
+// ─── Entity definitions & types ───
+export { defineEntity, ENTITY_REF_MARKER } from "./types";
+export type {
+  EntityRecord,
+  EntityKey,
+  EntityRegistry,
+  ResolveEntity,
+  EntityEvent,
+  EntityStore,
+  StorageEngine,
+  EntityDefinition,
+  EntityRef,
+  NormalizationResult,
+} from "./types";
