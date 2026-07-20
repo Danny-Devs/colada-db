@@ -195,6 +195,116 @@ describe("hydrateScope / preload — paging cold data back in", () => {
   });
 });
 
+describe("review-hardening regressions (B1–B4, A2)", () => {
+  it("B1a · setManifest BEFORE boot completes merges with prior sessions' index — never clobbers", async () => {
+    const engine = await seedEngine();
+    const store = createEntityStore();
+    const handle = enablePersistence(store, { engine, hydration: "manifest", writeDebounce: 1 });
+    handle.setManifest("newScope", ["contact:6"]); // fires while engine is opening
+    await handle.ready;
+    await handle.flush();
+
+    const index = engine.snapshot().get("__cdb_manifest__:__index__" as EntityKey);
+    expect(index).toBeDefined();
+    const scopes = (index!.data as { scopes: string[] }).scopes.sort();
+    expect(scopes).toEqual(["inbox", "newScope", "team"]);
+    handle.dispose();
+  });
+
+  it("B1b · 'all'-mode sessions preserve the persisted index when adding scopes", async () => {
+    const engine = await seedEngine();
+    const store = createEntityStore();
+    const handle = enablePersistence(store, { engine, writeDebounce: 1 }); // all mode
+    await handle.ready;
+    handle.setManifest("extra", ["contact:7"]);
+    await handle.flush();
+
+    const index = engine.snapshot().get("__cdb_manifest__:__index__" as EntityKey);
+    expect(index).toBeDefined();
+    const scopes = (index!.data as { scopes: string[] }).scopes.sort();
+    expect(scopes).toEqual(["extra", "inbox", "team"]);
+    expect(engine.snapshot().has("__cdb_manifest__:inbox" as EntityKey)).toBe(true); // no orphaning
+    handle.dispose();
+  });
+
+  it("B2 · the gc sweep flushes BEFORE evicting — an unflushed write survives to disk", async () => {
+    const engine = await seedEngine();
+    const store = createEntityStore();
+    const handle = enablePersistence(store, { engine, hydration: "manifest", writeDebounce: 5 });
+    await handle.ready;
+
+    handle.removeManifest("inbox"); // schedules the sweep
+    store.set("contact", "1", { id: "1", name: "LAST-WRITE" }); // pending, unflushed
+    await tick(40); // sweep fires: flush → then gc
+
+    expect(store.has("contact", "1")).toBe(false); // evicted (scope gone)
+    expect(engine.snapshot().get("contact:1" as EntityKey)?.data).toMatchObject({
+      name: "LAST-WRITE", // …but the write reached disk FIRST
+    });
+    handle.dispose();
+  });
+
+  it("B3 · dispose during hydrateScope's engine read leaves no retention behind", async () => {
+    const seeded = await seedEngine();
+    const slow: MemoryEngine = {
+      ...seeded,
+      async loadMany(keys) {
+        await tick(20); // hold the read so dispose can land mid-flight
+        return seeded.loadMany(keys);
+      },
+    };
+    const store = createEntityStore();
+    const handle = enablePersistence(store, {
+      engine: slow,
+      hydration: "manifest",
+      writeDebounce: 1,
+    });
+    await handle.ready;
+    handle.removeManifest("inbox");
+    await tick(40); // sweep: contact 1,2 evicted
+    handle.setManifest("inbox", ["contact:1", "contact:2", "contact:3"]);
+
+    const pending = handle.hydrateScope("inbox");
+    handle.dispose(); // races the loadMany above
+    expect(await pending).toBe(0); // post-await check refused to hydrate
+    expect(store.has("contact", "1")).toBe(false); // nothing resurrected
+
+    const evicted = store.gc(); // and nothing left pinned by the dead handle
+    expect(evicted.length).toBeGreaterThan(0); // team's keys were released by dispose
+  });
+
+  it("B4 · hydrateScope inside removeManifest's debounce window cannot re-pin a dead scope", async () => {
+    const engine = await seedEngine();
+    const store = createEntityStore();
+    const handle = enablePersistence(store, { engine, hydration: "manifest", writeDebounce: 5 });
+    await handle.ready;
+
+    handle.removeManifest("inbox");
+    const hydrated = await handle.hydrateScope("inbox"); // same window — must refuse
+    expect(hydrated).toBe(0);
+    await tick(40); // sweep
+
+    expect(store.has("contact", "1")).toBe(false); // evicted, not re-pinned
+    expect(store.gc()).toEqual([]); // and no stray refcounts holding anything
+    handle.dispose();
+  });
+
+  it("A2 · shrinking a scope's manifest releases the dropped keys' pins now", async () => {
+    const engine = await seedEngine();
+    const store = createEntityStore();
+    const handle = enablePersistence(store, { engine, hydration: "manifest", writeDebounce: 1 });
+    await handle.ready;
+
+    handle.setManifest("inbox", ["contact:1"]); // drops 2 and 3
+    const evicted = store.gc().sort();
+
+    expect(evicted).toEqual(["contact:2"]); // dropped + not otherwise referenced
+    expect(store.has("contact", "1")).toBe(true); // still in inbox
+    expect(store.has("contact", "3")).toBe(true); // survives via team
+    handle.dispose();
+  });
+});
+
 describe("default 'all' mode — unchanged, manifest-safe", () => {
   it("hydrates every entity row but never materializes manifest rows as entities", async () => {
     const engine = await seedEngine();
