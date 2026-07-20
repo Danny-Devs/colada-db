@@ -33,6 +33,13 @@ export type { MemoryEngine } from "./engines/memory";
 export { sqliteEngine } from "./engines/sqlite";
 export type { SqliteEngine, SqliteEngineOptions } from "./engines/sqlite";
 
+// ─── Optimistic transactions ───
+export { createOptimisticUpdates } from "./transactions";
+export type { OptimisticTransaction, OptimisticUpdates } from "./transactions";
+
+// ─── Real-time coalescing ───
+export { createCoalescer } from "./coalesce";
+
 // ─── Pagination merge recipes ───
 export { cursorPagination, offsetPagination, relayPagination } from "./pagination";
 export type { RelayPageInfo } from "./pagination";
