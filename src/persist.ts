@@ -641,7 +641,8 @@ export function enablePersistence(
       gcTimer = null;
     }
     // Refcounts must not outlive the coordinator that took them.
-    for (const scopeId of [...scopeRetentions.keys()]) releaseScope(scopeId);
+    // (Deleting the current entry during Map iteration is well-defined.)
+    for (const scopeId of scopeRetentions.keys()) releaseScope(scopeId);
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", onVisibilityChange);
     }
