@@ -202,6 +202,54 @@ describe("commit-time veto (willCommit, last-chance)", () => {
     off();
   });
 
+  it("netting FOLDS with store merge semantics — a trailing innocuous write cannot hide a forbidden one (F4)", () => {
+    const store = createEntityStore();
+    store.set("account", "1", { id: "1", balance: 100 });
+    const opt = createOptimisticUpdates(store);
+    const off = opt.useGate({
+      willCommit: (changeSet) =>
+        changeSet.some((c) => (c.data as { balance?: number })?.balance === 0)
+          ? "zero balance forbidden"
+          : true,
+    });
+
+    const tx = opt.transaction();
+    tx.set("account", "1", { id: "1", balance: 0 }); // forbidden…
+    tx.set("account", "1", { id: "1", note: "hi" }); // …must not be hidden by this
+    expect(() => tx.commit()).toThrow(PolicyVetoError);
+    expect(store.get("account", "1").value).toMatchObject({ balance: 100 }); // rolled back
+    off();
+  });
+
+  it("netting set-then-remove presents a remove; remove-then-set presents a fresh set", () => {
+    const store = createEntityStore();
+    store.set("contact", "1", { id: "1", name: "old" });
+    const opt = createOptimisticUpdates(store);
+
+    const seen: Array<{ type: string; data: unknown }> = [];
+    const off = opt.useGate({
+      willCommit: (changeSet) => {
+        seen.push(...changeSet.map((c) => ({ type: c.type, data: c.data })));
+        return true;
+      },
+    });
+
+    const tx = opt.transaction();
+    tx.set("contact", "1", { id: "1", name: "new" });
+    tx.remove("contact", "1");
+    tx.commit();
+    expect(seen).toEqual([{ type: "remove", data: undefined }]);
+
+    seen.length = 0;
+    const tx2 = opt.transaction();
+    tx2.remove("contact", "2");
+    tx2.set("contact", "2", { id: "2", fresh: true });
+    tx2.commit();
+    // set after remove starts fresh — no merge with anything pre-remove
+    expect(seen).toEqual([{ type: "set", data: { id: "2", fresh: true } }]);
+    off();
+  });
+
   it("a gate that mutates its inputs cannot corrupt rollback truth (copies, not live references)", () => {
     const store = createEntityStore();
     store.set("account", "1", { id: "1", balance: 100, owner: "danny" });

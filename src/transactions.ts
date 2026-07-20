@@ -396,22 +396,35 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
         if (idx === -1) return; // already committed/rolled back
 
         // Last-chance willCommit over the NET change set (ADR-007 §2): one
-        // entry per entity, last mutation wins, `previous` = the
-        // pre-transaction snapshot (what rollback would restore) — so a
-        // predicate like Σ(new − previous) counts each entity once instead
-        // of once per intermediate write. Copies, never live references.
-        // Veto → settle as rollback (0.3 guarantees disk untouched), then
-        // fail visibly.
+        // entry per entity, `data` = the transaction's net incoming payload
+        // FOLDED with the store's shallow-merge semantics (a trailing
+        // {note} write must not hide an earlier {balance:0} from the gate
+        // — review finding F4), `previous` = the pre-transaction snapshot.
+        // Final committed state for a set = {...previous, ...data}. A
+        // Σ(new − previous) predicate counts each entity once. Copies,
+        // never live references. Veto → settle as rollback (0.3 guarantees
+        // disk untouched), then fail visibly.
         if (gates.size > 0) {
           const netByKey = new Map<string, ProposedWrite>();
           for (const m of mutations) {
             const key = entityKey(m.entityType, m.id);
+            const prior = netByKey.get(key);
+            // Fold exactly like the store applies writes: sets shallow-merge
+            // onto the running net (a remove resets the base — a set after
+            // it starts fresh); a remove ends the net as a removal.
+            let netData: EntityRecord | undefined;
+            if (m.type === "set" && m.data) {
+              const base = prior?.type === "set" ? prior.data : undefined;
+              netData = base ? { ...base, ...m.data } : { ...m.data };
+            } else {
+              netData = undefined;
+            }
             const truth = serverTruth.get(key);
             netByKey.set(key, {
               entityType: m.entityType,
               id: m.id,
-              type: m.type,
-              data: m.data ? { ...m.data } : undefined,
+              type: m.type === "remove" ? "remove" : "set",
+              data: netData,
               previous: truth?.data ? { ...truth.data } : undefined,
             });
           }
