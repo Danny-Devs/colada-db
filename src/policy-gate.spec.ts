@@ -92,6 +92,29 @@ describe("pre-apply veto (willApply)", () => {
     off();
   });
 
+  it("a vetoed apply() self-settles — no orphaned active transaction pollutes later rollbacks", () => {
+    const store = createEntityStore();
+    const opt = createOptimisticUpdates(store);
+    const off = opt.useGate({
+      willApply: (change) => (change.entityType === "forbidden" ? false : true),
+    });
+    const outcomes: string[] = [];
+    const offSettled = opt.onSettled((e) => outcomes.push(`${e.transactionId}:${e.outcome}`));
+
+    // apply() throws before the caller ever gets a handle — it must settle itself
+    expect(() => opt.apply("forbidden", "1", { id: "1" })).toThrow(PolicyVetoError);
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatch(/:rollback$/);
+
+    // The orphan is gone: a later unrelated rollback replays cleanly
+    const tx = opt.transaction();
+    tx.set("contact", "1", { id: "1" });
+    tx.rollback();
+    expect(store.has("contact", "1")).toBe(false);
+    off();
+    offSettled();
+  });
+
   it("gates see the previous value; unregistering a gate stops enforcement", () => {
     const store = createEntityStore();
     store.set("account", "1", { id: "1", balance: 100 });

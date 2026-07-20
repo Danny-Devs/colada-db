@@ -152,6 +152,11 @@ export interface OptimisticUpdates {
    * (evaluation in registration order). A pre-apply veto makes `tx.set` /
    * `tx.remove` throw {@link PolicyVetoError}; a commit-time veto rolls
    * the transaction back and makes `commit()` throw.
+   *
+   * A vetoed WRITE does not settle the transaction — earlier allowed
+   * writes stay applied and the caller must still commit or roll back
+   * (the usual contract). `apply()` handles this internally: a veto there
+   * rolls back before rethrowing, since the caller never gets the handle.
    * @returns Unregister function
    */
   useGate(gate: PolicyGate): () => void;
@@ -452,7 +457,15 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
     data: EntityRecord,
   ): Pick<OptimisticTransaction, "commit" | "rollback"> {
     const tx = transaction();
-    tx.set(entityType, id, data);
+    try {
+      tx.set(entityType, id, data);
+    } catch (err) {
+      // A gate veto throws before the caller ever receives the handle —
+      // settle the otherwise-orphaned transaction so it can't linger in
+      // the replay bookkeeping forever.
+      tx.rollback();
+      throw err;
+    }
     return { commit: () => tx.commit(), rollback: () => tx.rollback() };
   }
 
