@@ -1,0 +1,118 @@
+/**
+ * The adapter-facing subscription boundary (ADR-008 §3).
+ *
+ * Framework adapters consume the store through THIS contract — plain
+ * callbacks + synchronous snapshot reads, the `useSyncExternalStore`-class
+ * shape every framework natively supports (React's hook, Svelte's store
+ * contract, Solid's `from()`). Adapters never import the internal signal
+ * library, so the core's reactivity substrate can be swapped (e.g., to
+ * TC39 Signals) without touching any adapter.
+ *
+ * The Vue adapter is the deliberate exception: it MAY bypass this boundary
+ * and consume the store's refs directly (its privileged fast path).
+ *
+ * Snapshot semantics: `getVersion()` is a monotonic tick that advances on
+ * every store event. External-store integrations use the version as the
+ * snapshot value and re-read entities on change. No-op writes emit no
+ * event and therefore do not tick — referential stability is preserved
+ * end to end.
+ */
+import type { EntityEvent, EntityKey, EntityRecord, EntityStore } from "./types";
+
+export interface StoreBoundary {
+  /** Notify on ANY store change. Returns an unsubscribe function. */
+  subscribe(listener: () => void): () => void;
+  /** Notify when one entity changes (set / remove / evict). */
+  subscribeEntity(entityType: string, id: string, listener: () => void): () => void;
+  /** Notify when any entity of a type changes. */
+  subscribeType(entityType: string, listener: () => void): () => void;
+  /**
+   * Monotonic change counter — the snapshot value for
+   * `useSyncExternalStore`-style integrations.
+   */
+  getVersion(): number;
+  /**
+   * Non-reactive snapshot read of one entity. Never creates reactive
+   * subscriptions or phantom refs on miss.
+   */
+  getEntity(entityType: string, id: string): EntityRecord | undefined;
+  /** Non-reactive snapshot of all entities of a type (id + data pairs). */
+  getEntities(entityType: string): Array<{ id: string; data: EntityRecord }>;
+  /** Tear down the boundary's own store subscription. */
+  dispose(): void;
+}
+
+/**
+ * Create a subscription boundary over a store.
+ *
+ * One underlying store subscription fans out to three listener tiers
+ * (global / per-type / per-key). Listener errors are isolated per
+ * listener so one broken consumer cannot starve the others.
+ */
+export function createStoreBoundary(store: EntityStore): StoreBoundary {
+  let version = 0;
+  const globalListeners = new Set<() => void>();
+  const typeListeners = new Map<string, Set<() => void>>();
+  const keyListeners = new Map<EntityKey, Set<() => void>>();
+
+  const safeCall = (fn: () => void): void => {
+    try {
+      fn();
+    } catch (err) {
+      // A consumer's listener must never break other consumers.
+      console.error("[colada-db] boundary listener threw:", err);
+    }
+  };
+
+  const unsubscribeStore = store.subscribe((event: EntityEvent) => {
+    version++;
+    for (const fn of globalListeners) safeCall(fn);
+    const forType = typeListeners.get(event.entityType);
+    if (forType) for (const fn of forType) safeCall(fn);
+    const forKey = keyListeners.get(event.key);
+    if (forKey) for (const fn of forKey) safeCall(fn);
+  });
+
+  const addTo = <K>(map: Map<K, Set<() => void>>, mapKey: K, listener: () => void): (() => void) => {
+    let set = map.get(mapKey);
+    if (!set) {
+      set = new Set();
+      map.set(mapKey, set);
+    }
+    set.add(listener);
+    return () => {
+      set.delete(listener);
+      if (set.size === 0) map.delete(mapKey);
+    };
+  };
+
+  return {
+    subscribe(listener) {
+      globalListeners.add(listener);
+      return () => globalListeners.delete(listener);
+    },
+    subscribeEntity(entityType, id, listener) {
+      return addTo(keyListeners, `${entityType}:${id}` as EntityKey, listener);
+    },
+    subscribeType(entityType, listener) {
+      return addTo(typeListeners, entityType, listener);
+    },
+    getVersion() {
+      return version;
+    },
+    getEntity(entityType, id) {
+      // has() guard first: get() on a miss would mint a phantom ref.
+      if (!store.has(entityType, id)) return undefined;
+      return store.get(entityType, id).value;
+    },
+    getEntities(entityType) {
+      return store.getEntriesByType(entityType);
+    },
+    dispose() {
+      unsubscribeStore();
+      globalListeners.clear();
+      typeListeners.clear();
+      keyListeners.clear();
+    },
+  };
+}

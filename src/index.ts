@@ -12,6 +12,10 @@
 // ─── Entity store ───
 export { createEntityStore } from "./store";
 
+// ─── Adapter-facing subscription boundary (ADR-008 §3) ───
+export { createStoreBoundary } from "./boundary";
+export type { StoreBoundary } from "./boundary";
+
 // ─── Normalization engine ───
 export { normalize, denormalize } from "./normalize";
 // Adapter-facing utilities (used by framework adapters; stable but low-level)
