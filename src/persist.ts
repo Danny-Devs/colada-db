@@ -192,12 +192,22 @@ export function enablePersistence(
     }, writeDebounce);
   }
 
+  let inflightFlush: Promise<void> | null = null;
+
   async function flush(): Promise<void> {
     if (flushTimer) {
       clearTimeout(flushTimer);
       flushTimer = null;
     }
-    if (!opened || disabled || disposed || flushing) return;
+    if (!opened || disabled || disposed) return;
+    // Concurrency contract: `await flush()` means "everything dirty as of
+    // this call is durable when I resolve". If a flush is in-flight, wait
+    // for it, then flush again — writes that arrived DURING the in-flight
+    // batch are in the dirty sets and must not be silently skipped.
+    if (flushing) {
+      await inflightFlush;
+      return flush();
+    }
     if (dirtySaves.size === 0 && dirtyDeletes.size === 0) return;
 
     flushing = true;
@@ -206,6 +216,8 @@ export function enablePersistence(
     dirtySaves.clear();
     dirtyDeletes.clear();
 
+    let settle!: () => void;
+    inflightFlush = new Promise<void>((r) => (settle = r));
     try {
       await engine.writeBatch(puts, deletes);
     } catch (err) {
@@ -216,6 +228,8 @@ export function enablePersistence(
       }
     } finally {
       flushing = false;
+      settle();
+      inflightFlush = null;
       // If new writes arrived during the flush, schedule another
       if (dirtySaves.size > 0 || dirtyDeletes.size > 0) {
         scheduleFlush();
@@ -291,16 +305,24 @@ export function enablePersistence(
 
   // ── Public handle ──────────────────────────
   function dispose(): void {
-    disposed = true;
+    if (disposed) return;
+    // Stop new dirt first, then best-effort final flush of everything
+    // already acknowledged to memory — an orderly teardown must not
+    // silently drop up to a debounce-window of writes.
     unsub();
-    if (flushTimer) clearTimeout(flushTimer);
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", onVisibilityChange);
     }
     if (typeof window !== "undefined") {
       window.removeEventListener("beforeunload", onBeforeUnload);
     }
-    engine.close();
+    const finalFlush = opened && !disabled ? flush() : Promise.resolve();
+    disposed = true;
+    void finalFlush.catch(() => {}).then(() => engine.close());
   }
 
   return { ready, durable, flush, dispose };
