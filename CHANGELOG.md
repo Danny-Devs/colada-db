@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-07-19] — 0.3: optimistic writes never touch disk until commit (Phase 0 complete)
+
+- [fix] C3 + the fourth bug: `enablePersistence` is now transaction-aware — set/remove events carrying a `transactionId` buffer per-transaction (`pendingTx`), never entering the dirty sets; commit graduates the buffer's net effect into the normal write path, rollback discards it. Cold-entity corruption (partial optimistic data flushed over durable truth mid-debounce) and rollback's durable deletion of never-owned rows are both dead.
+- [fix] The rollback-replay identity trap (resolution (a) from `docs/design/optimistic-durability.md`): `recompute` now replays each remaining active transaction under its OWN identity via `runWith({origin:"rollback-replay", transactionId})`, and step-1 server-truth restores carry the dying transaction's id — so compensating writes are discarded with its buffer and replayed optimistic state re-buffers idempotently instead of masquerading as confirmed.
+- [feat] Commit signal: `OptimisticUpdates.onSettled(listener)` — settlement notifications (`{transactionId, outcome}`) fire after store effects; persistence discovers the store's handle lazily via the WeakMap-backed `createOptimisticUpdates(store)` on first transactional event. No new public store surface. `TransactionSettledEvent` exported.
+- [test] `optimistic-durability.spec.ts` — the spec's 6 done-defining tests (rollback write-count-0, cold-entity byte-unchanged, commit flush, concurrent A/B rollback-commit and double-rollback, dispose drops uncommitted buffers, non-transactional regression). Verified live: 5/7 fail against pre-0.3 source.
+- Verified: 163/163 tests, typecheck, build, lint. **Phase 0 (durability seam) is complete** — roadmap 0.1–0.6 all landed.
+
 ## [2026-07-19] — durability seam deep fixes + the write channel (arch-review response)
 
 - [fix] C2: flush concurrency contract (`await flush()` = durable on resolve; drains in-flight then re-flushes) + dispose() final-flush before engine close, idempotent (`durability.spec.ts`, deterministic slow-engine harness).

@@ -20,6 +20,7 @@
 import type { EntityKey, EntityRecord, EntityStore, StorageEngine } from "./types";
 import { encodeEntityRefs, decodeEntityRefs } from "./store";
 import { idbEngine } from "./engines/idb";
+import { createOptimisticUpdates, type TransactionSettledEvent } from "./transactions";
 
 // ─────────────────────────────────────────────
 // Types
@@ -105,6 +106,12 @@ export async function requestDurableStorage(): Promise<boolean> {
  * `store.clear()` emits a `remove` per entity, so a full reset clears the
  * durable copies too.
  *
+ * **Optimistic writes never touch disk until commit:** events carrying a
+ * `transactionId` are buffered per-transaction; commit graduates the
+ * buffer's net effect into the normal write path, rollback discards it.
+ * Uncommitted buffers die at `dispose()`/unload by design — they were
+ * never confirmed. See `docs/design/optimistic-durability.md`.
+ *
  * @example
  * ```typescript
  * import { useEntityStore, enablePersistence, sqliteEngine } from 'pinia-colada-plugin-normalizer'
@@ -137,6 +144,14 @@ export function enablePersistence(
   // ── State ──────────────────────────────────
   const dirtySaves = new Map<EntityKey, unknown>(); // key → encoded data
   const dirtyDeletes = new Set<EntityKey>();
+  // Per-transaction buffers — optimistic writes parked here until settlement
+  // (docs/design/optimistic-durability.md). Disk persists CONFIRMED state
+  // only: commit graduates a buffer into the dirty sets; rollback discards
+  // it. Entry shape is per-key net effect + op type — this buffer is the
+  // proto-outbox (ADR-006 §1); Stage 3 upgrades entries to LocalChange.
+  type BufferedOp = { op: "put"; value: unknown } | { op: "delete" };
+  const pendingTx = new Map<string, Map<EntityKey, BufferedOp>>();
+  let settledUnsub: (() => void) | null = null;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let opened = false;
   let disabled = false;
@@ -166,6 +181,35 @@ export function enablePersistence(
     if (isHydrating || disabled || disposed) return;
 
     const key = event.key;
+
+    // ── Transactional writes: buffer until settlement ──
+    // Any set/remove carrying a transactionId is optimistic — it may yet
+    // roll back, so it must not reach the dirty sets. This routing is safe
+    // ONLY because the transaction layer replays under the owner's identity
+    // (resolution (a)): rollback-replay events carry their transaction's id
+    // too, so nothing optimistic ever arrives id-less. The buffer is keyed
+    // net-effect-per-key, so idempotent re-buffering during replay is free.
+    const txId = event.transactionId;
+    if (txId !== undefined && (event.type === "set" || event.type === "remove")) {
+      if (!settledUnsub) {
+        // First transactional event seen — obtain THE store's optimistic
+        // handle (WeakMap-backed, same instance by construction) and learn
+        // about settlements. No new public store surface.
+        settledUnsub = createOptimisticUpdates(store).onSettled(onTxSettled);
+      }
+      let buffer = pendingTx.get(txId);
+      if (!buffer) {
+        buffer = new Map();
+        pendingTx.set(txId, buffer);
+      }
+      if (event.type === "set" && event.data != null) {
+        buffer.set(key, { op: "put", value: encodeEntityRefs(event.data) });
+      } else if (event.type === "remove") {
+        buffer.set(key, { op: "delete" });
+      }
+      return; // nothing confirmed changed — no flush to schedule
+    }
+
     if (event.type === "set" && event.data != null) {
       dirtySaves.set(key, encodeEntityRefs(event.data));
       dirtyDeletes.delete(key);
@@ -182,6 +226,29 @@ export function enablePersistence(
     }
     scheduleFlush();
   });
+
+  // ── Transaction settlement ─────────────────
+  // Commit: the buffer's net effects are now confirmed state — graduate
+  // them into the dirty sets and flush normally. Rollback: the transaction
+  // never happened; its buffer (including the compensating rollback-replay
+  // events re-buffered under its id) dies in memory. Disk untouched.
+  function onTxSettled(event: TransactionSettledEvent): void {
+    const buffer = pendingTx.get(event.transactionId);
+    if (!buffer) return;
+    pendingTx.delete(event.transactionId);
+    if (disabled || disposed || event.outcome === "rollback") return;
+
+    for (const [key, entry] of buffer) {
+      if (entry.op === "put") {
+        dirtySaves.set(key, entry.value);
+        dirtyDeletes.delete(key);
+      } else {
+        dirtyDeletes.add(key);
+        dirtySaves.delete(key);
+      }
+    }
+    scheduleFlush();
+  }
 
   // ── Flush logic ────────────────────────────
   function scheduleFlush(): void {
@@ -308,8 +375,14 @@ export function enablePersistence(
     if (disposed) return;
     // Stop new dirt first, then best-effort final flush of everything
     // already acknowledged to memory — an orderly teardown must not
-    // silently drop up to a debounce-window of writes.
+    // silently drop up to a debounce-window of writes. Buffered entries of
+    // UNCOMMITTED transactions are deliberately NOT flushed: they were
+    // never confirmed, so they die with the session (the app's mutation
+    // re-runs or fails visibly — see the durability-window guide).
     unsub();
+    settledUnsub?.();
+    settledUnsub = null;
+    pendingTx.clear();
     if (flushTimer) {
       clearTimeout(flushTimer);
       flushTimer = null;

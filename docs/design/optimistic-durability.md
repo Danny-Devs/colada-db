@@ -1,6 +1,6 @@
 # Design: optimistic writes never touch disk until commit (roadmap 0.3 / arch review C3)
 
-**Status:** SPEC — implement next session on this design, not improvised.
+**Status:** IMPLEMENTED 2026-07-19 — resolution (a) chosen (replay under the owner's identity); commit signal = `onSettled` on the optimistic-updates handle, exactly as designed below. Done-defining tests live in `src/optimistic-durability.spec.ts` (all 6, verified failing against pre-0.3 source).
 **Fixes:** C3 (rollback durably deletes rows the tx never owned) and the fourth bug found during analysis: an optimistic `set` on a cold (evicted-but-durable) entity flushes PARTIAL optimistic data over durable server truth within the debounce window — corruption even on the happy path, before any rollback.
 
 ## Principle

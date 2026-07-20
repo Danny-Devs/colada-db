@@ -33,6 +33,17 @@ interface OptimisticMutation {
 }
 
 /**
+ * Settlement notification — how downstream layers (persistence, the
+ * proto-outbox) learn that "transaction N is confirmed" or "transaction N
+ * never happened". Commit emits no entity events (re-applying identical
+ * data is no-op-suppressed), so confirmation needs its own channel.
+ */
+export interface TransactionSettledEvent {
+  transactionId: string;
+  outcome: "commit" | "rollback";
+}
+
+/**
  * An optimistic transaction — a group of mutations that can be
  * committed (on success) or rolled back (on failure) atomically.
  */
@@ -62,6 +73,14 @@ export interface OptimisticUpdates {
   ): Pick<OptimisticTransaction, "commit" | "rollback">;
   /** Create a multi-mutation transaction. */
   transaction(): OptimisticTransaction;
+  /**
+   * Subscribe to transaction settlement (commit/rollback). Fires AFTER the
+   * settling transaction's store effects — on rollback, the compensating
+   * events have already been emitted when the listener runs, so a buffer
+   * keyed by transactionId can be discarded wholesale.
+   * @returns Unsubscribe function
+   */
+  onSettled(listener: (event: TransactionSettledEvent) => void): () => void;
 }
 
 /**
@@ -90,8 +109,19 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
   // Server truth snapshots — captured before optimistic mutations modify an entity.
   const serverTruth = new Map<string, { existed: boolean; data?: EntityRecord }>();
 
-  // Active transactions — maintained in order for deterministic replay
-  const activeTransactions: Array<{ mutations: OptimisticMutation[] }> = [];
+  // Active transactions — maintained in order for deterministic replay.
+  // Each entry carries its transactionId so replay can run under the
+  // owner's identity (docs/design/optimistic-durability.md, resolution (a)).
+  const activeTransactions: Array<{ transactionId: string; mutations: OptimisticMutation[] }> = [];
+
+  // Settlement listeners (persistence's commit signal).
+  const settledListeners = new Set<(event: TransactionSettledEvent) => void>();
+
+  function notifySettled(transactionId: string, outcome: "commit" | "rollback"): void {
+    for (const listener of settledListeners) {
+      listener({ transactionId, outcome });
+    }
+  }
 
   // Transaction identity for event attribution (write-channel, ADR-007 §1).
   // Monotonic per handle; the Stage-3 LocalChange upgrades this to an
@@ -121,62 +151,74 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
   /**
    * Restore server truth for entities, then replay all active transactions.
    * This is TanStack DB's "clear and replay" approach.
+   *
+   * Every write runs under `origin: "rollback-replay"` so consumers (undo
+   * stacks, history, persistence) can tell compensating writes from fresh
+   * user intent — AND under a transactionId, because identity decides
+   * durability (docs/design/optimistic-durability.md):
+   *
+   * - Step 1's compensating writes carry the ROLLED-BACK transaction's id:
+   *   they exist only to undo that transaction's memory effects, so
+   *   persistence buffers them under the dying transaction and discards
+   *   them with it at settlement. Disk was never touched by the
+   *   transaction; it must not be touched by the undo either.
+   * - Step 2's replayed writes each carry their OWNER's id: replayed
+   *   optimistic state lands back in its own buffer (idempotent re-buffer).
+   *   Replaying without identity was the 2026-07-19 trap — those events
+   *   would masquerade as confirmed writes and leak optimistic data to disk.
    */
-  function recompute(affectedKeys: Set<string>): void {
+  function recompute(affectedKeys: Set<string>, rolledBackTxId: string): void {
     // Step 1: Restore server truth for affected entities
-    for (const key of affectedKeys) {
-      const truth = serverTruth.get(key);
-      if (!truth) continue;
+    store.runWith({ origin: "rollback-replay", transactionId: rolledBackTxId }, () => {
+      for (const key of affectedKeys) {
+        const truth = serverTruth.get(key);
+        if (!truth) continue;
 
-      const [entityType, id] = splitEntityKey(key);
+        const [entityType, id] = splitEntityKey(key);
 
-      // Check if any remaining active transaction references this entity
-      const stillReferenced = activeTransactions.some((tx) =>
-        tx.mutations.some((m) => entityKey(m.entityType, m.id) === key),
-      );
+        // Check if any remaining active transaction references this entity
+        const stillReferenced = activeTransactions.some((tx) =>
+          tx.mutations.some((m) => entityKey(m.entityType, m.id) === key),
+        );
 
-      if (!stillReferenced) {
-        // No active transaction references this entity — restore and clean up
-        if (truth.existed && truth.data) {
-          store.replace(entityType, id, truth.data);
-        } else if (!truth.existed) {
-          store.remove(entityType, id);
-        }
-        serverTruth.delete(key);
-      } else {
-        // Still referenced — restore server truth, then replay will re-apply
-        if (truth.existed && truth.data) {
-          store.replace(entityType, id, truth.data);
-        } else if (!truth.existed && store.has(entityType, id)) {
-          store.remove(entityType, id);
+        if (!stillReferenced) {
+          // No active transaction references this entity — restore and clean up
+          if (truth.existed && truth.data) {
+            store.replace(entityType, id, truth.data);
+          } else if (!truth.existed) {
+            store.remove(entityType, id);
+          }
+          serverTruth.delete(key);
+        } else {
+          // Still referenced — restore server truth, then replay will re-apply
+          if (truth.existed && truth.data) {
+            store.replace(entityType, id, truth.data);
+          } else if (!truth.existed && store.has(entityType, id)) {
+            store.remove(entityType, id);
+          }
         }
       }
-    }
+    });
 
-    // Step 2: Replay all active transactions in order
+    // Step 2: Replay all active transactions in order, each under its own identity
     for (const tx of activeTransactions) {
-      for (const mutation of tx.mutations) {
-        if (mutation.type === "set" && mutation.data) {
-          store.set(mutation.entityType, mutation.id, mutation.data);
-        } else if (mutation.type === "remove") {
-          store.remove(mutation.entityType, mutation.id);
+      store.runWith({ origin: "rollback-replay", transactionId: tx.transactionId }, () => {
+        for (const mutation of tx.mutations) {
+          if (mutation.type === "set" && mutation.data) {
+            store.set(mutation.entityType, mutation.id, mutation.data);
+          } else if (mutation.type === "remove") {
+            store.remove(mutation.entityType, mutation.id);
+          }
         }
-      }
+      });
     }
-  }
-
-  /** Rollback restoration + replay runs under its own origin so consumers
-   *  (undo stacks, history, persistence) can tell compensating writes from
-   *  fresh user intent. */
-  function recomputeAttributed(affectedKeys: Set<string>): void {
-    store.runWith({ origin: "rollback-replay" }, () => recompute(affectedKeys));
   }
 
   function transaction(): OptimisticTransaction {
     const mutations: OptimisticMutation[] = [];
-    const txEntry = { mutations };
-    activeTransactions.push(txEntry);
     const transactionId = `tx-${++txCounter}`;
+    const txEntry = { transactionId, mutations };
+    activeTransactions.push(txEntry);
     const meta = { origin: "local-mutation", transactionId };
 
     return {
@@ -232,6 +274,8 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
             }
           }
         }
+
+        notifySettled(transactionId, "commit");
       },
 
       rollback() {
@@ -244,8 +288,12 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
         // Remove this transaction
         activeTransactions.splice(idx, 1);
 
-        // Restore server truth + replay remaining transactions
-        recomputeAttributed(affectedKeys);
+        // Restore server truth + replay remaining transactions — BEFORE the
+        // settlement notification, so the compensating events are already
+        // buffered under this (dying) transaction when listeners discard it.
+        recompute(affectedKeys, transactionId);
+
+        notifySettled(transactionId, "rollback");
       },
     };
   }
@@ -260,5 +308,12 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
     return { commit: () => tx.commit(), rollback: () => tx.rollback() };
   }
 
-  return { apply, transaction };
+  function onSettled(listener: (event: TransactionSettledEvent) => void): () => void {
+    settledListeners.add(listener);
+    return () => {
+      settledListeners.delete(listener);
+    };
+  }
+
+  return { apply, transaction, onSettled };
 }

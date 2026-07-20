@@ -35,7 +35,11 @@ export type { SqliteEngine, SqliteEngineOptions } from "./engines/sqlite";
 
 // ─── Optimistic transactions ───
 export { createOptimisticUpdates } from "./transactions";
-export type { OptimisticTransaction, OptimisticUpdates } from "./transactions";
+export type {
+  OptimisticTransaction,
+  OptimisticUpdates,
+  TransactionSettledEvent,
+} from "./transactions";
 
 // ─── Real-time coalescing ───
 export { createCoalescer } from "./coalesce";
