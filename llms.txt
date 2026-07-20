@@ -1,0 +1,32 @@
+# colada-db
+
+> Local-first client database for the browser: a normalized reactive entity
+> store (synchronous reads from an in-memory projection) over pluggable
+> write-behind durability engines (in-memory, IndexedDB, OPFS SQLite in a
+> worker). Designed AI-first (ADR-007): origin-attributed writes, a
+> pre-apply policy gate, a capped history store, and a machine-legible
+> schema export are the committed Stage-2 cornerstone — designed and
+> audited, not yet in this build. Framework-agnostic core; adapters consume
+> a two-function subscription boundary; Vue gets a privileged direct-ref path.
+
+Status: pre-release, unpublished. Extracted 2026-07-19 from the shipped
+`pinia-colada-plugin-normalizer` (npm, 0.3.0), which becomes its Vue adapter.
+
+## Read first
+- AGENTS.md: how to work on this repo — verify commands, extraction chip state, reading order
+- docs/adr/: the constitution (ADR-003 memory projection · 004 evict-vs-remove · 005 sync posture · 006 SyncAdapter contract · 007 AI-first cornerstone · 008 boring core, radical edges)
+- docs/BATTLE-TESTED.md: what was adopted from 12+ production systems, what failures are structurally prevented, where the contract leads the field
+- CHANGELOG.md: session-by-session history with verification evidence
+
+## Source map (src/)
+- store.ts: EntityStore — reactive normalized entity graph; set/replace/setMany/update/remove/evict, refcounts + gc(), subscribe
+- normalize.ts: normalize()/denormalize() — extract entities from payloads into the store; resolve refs back with structural sharing
+- transactions.ts: createOptimisticUpdates(store) — optimistic transactions, clear-and-replay rollback, concurrency-correct commit
+- boundary.ts: createStoreBoundary(store) — framework-adapter contract (subscribe + version snapshot + phantom-safe reads)
+- persist.ts: enablePersistence(store, {engine}) — boot hydration + debounced write-behind + requestDurableStorage()
+- engines/: memory.ts · idb.ts (Safari-hang armor) · sqlite.ts + sqlite-core/protocol + ../sqlite-worker.ts (OPFS, no COOP/COEP)
+- pagination.ts: cursor/offset/relay merge recipes
+- types.ts: EntityStore/StorageEngine/EntityEvent contracts, defineEntity, EntityRegistry (module augmentation)
+
+## Verify
+CI=true pnpm test · pnpm typecheck · pnpm build · pnpm lint (all must be green)

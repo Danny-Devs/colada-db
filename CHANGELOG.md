@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026-07-19] — Operation Spick-and-Span, night one: Track A complete + chip 2.5 + honesty pass
+
+- [feat] Chip 2.5: `createOptimisticUpdates(store)` (src/transactions.ts) + `createCoalescer` (src/coalesce.ts) moved from the plugin's composables.ts, logic unchanged — TanStack-style clear-and-replay transactions, concurrency-correct commit folding. This is the substrate the Stage-2a `willCommit` gate wraps.
+- [feat] A3 Safari armor: idbEngine open() per-attempt deadline + retry + memory-only degradation (WebKit 226547 — open() can hang with no callback). A4 quota armor: `requestDurableStorage()` + `enablePersistence({requestDurable})`.
+- [test] A1 referential-stability suite (Dexie #2034 class) incl. rollback leg; A2 optimistic-op cleanup after failure storms (Dexie #2058 class). **Track A complete. 137 tests green** (113 → 137 tonight); typecheck/build/lint clean each commit.
+- [chore] docs/BATTLE-TESTED.md added (adopted/refused/ahead receipts ledger); llms.txt added; README + BATTLE-TESTED tense-honesty pass per AI-first audit (unshipped ADR-007 primitives now clearly marked PLANNED — the audit's verdict: "architecture-true, code-false"; full audit in project folder).
+
 ## [2026-07-19] — subscription boundary (ADR-008 §3)
 
 - [feat] `createStoreBoundary(store)` in `src/boundary.ts` — the adapter-facing contract: global / per-type / per-entity listeners fanned out from one store subscription, monotonic `getVersion()` as the external-store snapshot (no tick on no-op writes), `has()`-guarded snapshot reads that never mint phantom refs, per-listener error isolation, `dispose()`. 9 tests incl. the `useSyncExternalStore`-shaped vanilla-consumer contract test. 113 total green; typecheck/build/lint clean.
