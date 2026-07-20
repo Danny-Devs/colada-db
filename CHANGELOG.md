@@ -1,5 +1,11 @@
 # Changelog
 
+## [2026-07-19] — ADR-008 design verdict + chip-2 normalization engine
+
+- [feat] Chip 2: `normalize`/`denormalize` + helpers (`identifyEntity`, `splitEntityKey`, `writeEntitiesToStore`, walkers) extracted verbatim from the plugin's `plugin.ts` into `src/normalize.ts`; `normalize.spec.ts` came along. 104 tests green; typecheck/build/lint clean.
+- [feat] ADR-008 accepted (council 2026-07-19): boring core, radical edges — port map (storage/sync/framework/agent/encryption/model/vector), `@vue/reactivity` internal behind an adapter-facing subscription boundary (TC39-swappable), Vite-playbook sequencing (Vue → vanilla → React), `encryptedEngine` planned as a FREE StorageEngine wrapper, agent demo = the acquisition wedge.
+- Note: chip 3 (plugin swaps to `colada-db` dependency) is gated on the package being installable from the plugin repo — i.e., Danny's npm publish (or a git-URL dependency); a `file:` path out of the repo would break plugin CI.
+
 ## [2026-07-19] — repo born: chip-1 extraction from pinia-colada-plugin-normalizer
 
 - [feat] Standalone engine extracted from `pinia-colada-plugin-normalizer` 0.3.0 (decision record: sweeos `core/projects/pinia-colada-normalizer-project/COMPETITIVE-PHASE-2026-07.md`). Moved verbatim where possible: `store.ts`, `persist.ts`, `pagination.ts`, `engines/` (memory / IndexedDB / OPFS SQLite + worker protocol), `sqlite-worker.ts`, and the framework-free spec files (`store.spec`, `persist.spec`, `engines.spec` — 80 tests).
