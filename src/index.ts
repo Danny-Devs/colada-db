@@ -12,6 +12,11 @@
 // ─── Entity store ───
 export { createEntityStore } from "./store";
 
+// ─── Normalization engine ───
+export { normalize, denormalize } from "./normalize";
+// Adapter-facing utilities (used by framework adapters; stable but low-level)
+export { splitEntityKey, writeEntitiesToStore } from "./normalize";
+
 // ─── Persistence (write-behind wiring over a StorageEngine) ───
 export { enablePersistence } from "./persist";
 export type { PersistenceOptions, PersistenceHandle } from "./persist";
