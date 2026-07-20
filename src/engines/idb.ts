@@ -13,14 +13,30 @@ const STORE_NAME = "entities";
 export interface IdbEngineOptions {
   /** IndexedDB database name. @default 'pcn_entities' */
   dbName?: string;
+  /**
+   * Deadline for a single indexedDB.open() attempt, in ms. Safari/WebKit
+   * (bug 226547) can leave open() hanging forever with no callback at all;
+   * without a deadline the whole persistence boot hangs with it.
+   * @default 4000
+   */
+  openTimeoutMs?: number;
+  /** Total open() attempts before giving up (deadline applies per attempt). @default 2 */
+  openAttempts?: number;
 }
 
 export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
-  const { dbName = "pcn_entities" } = options;
+  const { dbName = "pcn_entities", openTimeoutMs = 4000, openAttempts = 2 } = options;
   let db: IDBDatabase | null = null;
 
   function openDatabase(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        // The request can't be canceled — abandon it. If it ever succeeds
+        // late, close the connection so it doesn't leak or block upgrades.
+        reject(new Error(`IDB open timed out after ${openTimeoutMs}ms (WebKit 226547 class)`));
+      }, openTimeoutMs);
       const request = indexedDB.open(dbName, 1);
       request.onupgradeneeded = () => {
         const database = request.result;
@@ -28,11 +44,24 @@ export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
           database.createObjectStore(STORE_NAME);
         }
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        clearTimeout(timer);
+        if (timedOut) {
+          request.result.close();
+          return;
+        }
+        resolve(request.result);
+      };
+      request.onerror = () => {
+        clearTimeout(timer);
+        reject(request.error);
+      };
       // If another tab holds a connection and we need to upgrade, open hangs
       // indefinitely without this handler. Reject so the ready promise settles.
-      request.onblocked = () => reject(new Error("IDB open blocked by another connection"));
+      request.onblocked = () => {
+        clearTimeout(timer);
+        reject(new Error("IDB open blocked by another connection"));
+      };
     });
   }
 
@@ -42,11 +71,27 @@ export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
     },
 
     async open() {
-      db = await openDatabase();
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= openAttempts; attempt++) {
+        try {
+          db = await openDatabase();
+          lastError = undefined;
+          break;
+        } catch (err) {
+          lastError = err;
+          // Brief backoff before retrying — a hung/blocked first attempt
+          // often succeeds immediately on retry (Safari), and a blocked
+          // upgrade may have been released.
+          if (attempt < openAttempts) {
+            await new Promise((r) => setTimeout(r, 250));
+          }
+        }
+      }
+      if (lastError !== undefined) throw lastError;
       // If another tab opens this DB with a higher version, close gracefully
       // to unblock the other tab's upgrade. The next writeBatch rejects,
       // which tells the coordinator to disable persistence for this tab.
-      db.onversionchange = () => {
+      db!.onversionchange = () => {
         db?.close();
         db = null;
       };

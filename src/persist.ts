@@ -43,15 +43,46 @@ export interface PersistenceOptions {
   onReady?: () => void;
   /** Called when persistence degrades (engine failure, quota). */
   onError?: (error: unknown) => void;
+  /**
+   * Ask the browser to protect this origin's storage from automatic
+   * eviction under disk pressure (`navigator.storage.persist()`). The real
+   * durability risk in browsers is not corruption — it's silent quota
+   * eviction wiping the database. Opt-in because some browsers (Firefox)
+   * surface a permission prompt.
+   * @default false
+   */
+  requestDurable?: boolean;
 }
 
 export interface PersistenceHandle {
   /** Resolves when hydration from the engine is complete. */
   ready: Promise<void>;
+  /**
+   * Resolves `true` if the browser granted durable (eviction-protected)
+   * storage. Always `false` unless `requestDurable: true` was passed and
+   * the platform granted it. Never rejects.
+   */
+  durable: Promise<boolean>;
   /** Force-flush pending writes to the engine immediately. */
   flush(): Promise<void>;
   /** Unsubscribe from store changes and release the engine. */
   dispose(): void;
+}
+
+/**
+ * Ask the browser to mark this origin's storage as durable (protected from
+ * automatic eviction under storage pressure). Safe to call anywhere:
+ * resolves `false` on unsupported platforms and never rejects.
+ */
+export async function requestDurableStorage(): Promise<boolean> {
+  try {
+    if (typeof navigator === "undefined" || !navigator.storage?.persist) return false;
+    // Already granted (e.g., an installed PWA or a prior grant)?
+    if (navigator.storage.persisted && (await navigator.storage.persisted())) return true;
+    return await navigator.storage.persist();
+  } catch {
+    return false;
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -100,6 +131,7 @@ export function enablePersistence(
     writeDebounce = 100,
     onReady,
     onError,
+    requestDurable = false,
   } = options;
 
   // ── State ──────────────────────────────────
@@ -116,10 +148,15 @@ export function enablePersistence(
   if (!engine.isSupported()) {
     return {
       ready: Promise.resolve(),
+      durable: Promise.resolve(false),
       flush: () => Promise.resolve(),
       dispose: () => {},
     };
   }
+
+  // ── Eviction protection (A4) ───────────────
+  // Fire-and-forget alongside engine open; never blocks hydration.
+  const durable = requestDurable ? requestDurableStorage() : Promise.resolve(false);
 
   // ── Subscribe to store changes ─────────────
   // IMPORTANT: store.subscribe fires synchronously within store.set().
@@ -266,5 +303,5 @@ export function enablePersistence(
     engine.close();
   }
 
-  return { ready, flush, dispose };
+  return { ready, durable, flush, dispose };
 }
