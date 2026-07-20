@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-07-19] — durability seam deep fixes + the write channel (arch-review response)
+
+- [fix] C2: flush concurrency contract (`await flush()` = durable on resolve; drains in-flight then re-flushes) + dispose() final-flush before engine close, idempotent (`durability.spec.ts`, deterministic slow-engine harness).
+- [fix] C1: tombstoned removes — `remove()` emits against memory-absent keys (idempotent instruction semantics); kills zombie resurrection of evicted entities, end-to-end verified across simulated boots (`tombstone.spec.ts`). `evict()` of nothing remains a true no-op.
+- [feat] The write channel: `EntityEvent.origin?/transactionId?` + `store.runWith(meta, fn)` (nesting-safe). Transactions stamp `local-mutation`+txId; rollback restoration stamps `rollback-replay`. ADR-007 §1 substrate shipped early — C3's deep fix ("optimistic writes never touch disk until commit") now has its mechanism.
+- [chore] Both independent audits filed in the project folder (AI-first + architecture review); publish plan rebuilt as `../ROADMAP-TO-PUBLISH.md` (phases 0–4; live queries promoted to Phase 2 per Danny).
+- Verified: 149/149 tests, typecheck, build, lint — every commit.
+
 ## [2026-07-19] — Operation Spick-and-Span, night one: Track A complete + chip 2.5 + honesty pass
 
 - [feat] Chip 2.5: `createOptimisticUpdates(store)` (src/transactions.ts) + `createCoalescer` (src/coalesce.ts) moved from the plugin's composables.ts, logic unchanged — TanStack-style clear-and-replay transactions, concurrency-correct commit folding. This is the substrate the Stage-2a `willCommit` gate wraps.
