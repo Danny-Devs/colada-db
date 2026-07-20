@@ -89,6 +89,42 @@ describe("erasure — purge on remove/clear", () => {
   });
 });
 
+describe("erasure boundary — KNOWN LIMIT, pinned until transaction-aware invalidation lands", () => {
+  // Review finding F1 (2026-07-19): replay bookkeeping in the transaction
+  // layer survives remove/clear. This test PINS the current (unwanted)
+  // resurrection so the boundary is visible and the follow-up fix flips
+  // exactly one assertion set. The documented contract: settle or abort
+  // all transactions BEFORE erasure flows.
+  it("a rollback AFTER clear() re-records replayed data (why logout must settle transactions first)", () => {
+    const store = createEntityStore();
+    const history = enableHistory(store);
+    store.set("contact", "1", { id: "1", secret: "hunter2" });
+
+    const opt = createOptimisticUpdates(store);
+    const tx = opt.transaction();
+    tx.set("contact", "1", { id: "1", secret: "hunter3" });
+
+    store.clear(); // erasure with tx still in flight
+    expect(JSON.stringify(history.list())).not.toContain("hunter"); // scrubbed…
+
+    tx.rollback(); // …but replay bookkeeping resurrects the snapshot
+    expect(JSON.stringify(history.list())).toContain("hunter2"); // ← the known limit
+
+    // The SAFE pattern the docs mandate: settle first, then erase
+    const store2 = createEntityStore();
+    const history2 = enableHistory(store2);
+    store2.set("contact", "1", { id: "1", secret: "hunter2" });
+    const opt2 = createOptimisticUpdates(store2);
+    const tx2 = opt2.transaction();
+    tx2.set("contact", "1", { id: "1", secret: "hunter3" });
+    tx2.rollback(); // settle FIRST
+    store2.clear(); // then erase
+    expect(JSON.stringify(history2.list())).not.toContain("hunter"); // holds
+    history.dispose();
+    history2.dispose();
+  });
+});
+
 describe("bounds", () => {
   it("count cap drops oldest rows first", () => {
     const store = createEntityStore();

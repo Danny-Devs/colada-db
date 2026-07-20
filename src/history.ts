@@ -14,6 +14,15 @@
  *   append a single data-free remove marker. Erasure/logout must actually
  *   erase: `store.clear()` emits a remove per entity, so a reset scrubs
  *   the history of entity data too (audit amendment).
+ *
+ *   ⚠️ ERASURE BOUNDARY (2026-07-19 review finding): the guarantee holds
+ *   for SETTLED state. In-flight optimistic transactions hold replay
+ *   copies (server-truth snapshots + mutation logs) that `remove`/`clear`
+ *   do not invalidate — a later rollback replays them, re-writing the
+ *   store and re-recording rows here. Settle or abort all transactions
+ *   BEFORE an erasure flow (logout). Transaction-aware erasure
+ *   invalidation is specced as follow-up work (see the erasure boundary
+ *   test in history.spec.ts, which pins today's behavior).
  * - `evict` events → excluded entirely. Cache trimming is not a data
  *   change; existing rows for the entity remain (they describe real
  *   changes that happened).

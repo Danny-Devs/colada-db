@@ -174,7 +174,7 @@ describe("commit-time veto (willCommit, last-chance)", () => {
     handle.dispose();
   });
 
-  it("willCommit sees the pre-transaction value as previous (net old → new)", () => {
+  it("willCommit sees a NET change set: one entry per entity, previous = pre-transaction snapshot", () => {
     const store = createEntityStore();
     store.set("account", "1", { id: "1", balance: 100 });
     const opt = createOptimisticUpdates(store);
@@ -192,11 +192,39 @@ describe("commit-time veto (willCommit, last-chance)", () => {
     tx.set("account", "1", { id: "1", balance: 25 }); // second write, same tx
     tx.commit();
 
+    // ONE entry (a Σ(new − previous) predicate must not double-count),
     // previous = pre-transaction snapshot, not the intermediate 50
-    expect(seen.at(-1)).toMatchObject({
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
       prev: { balance: 100 },
       next: { balance: 25 },
     });
+    off();
+  });
+
+  it("a gate that mutates its inputs cannot corrupt rollback truth (copies, not live references)", () => {
+    const store = createEntityStore();
+    store.set("account", "1", { id: "1", balance: 100, owner: "danny" });
+    const opt = createOptimisticUpdates(store);
+
+    const off = opt.useGate({
+      willApply: (change) => {
+        (change.previous as Record<string, unknown>).owner = "MUTATED-APPLY";
+        (change.data as Record<string, unknown>).owner = "MUTATED-APPLY";
+        return true;
+      },
+      willCommit: (changeSet) => {
+        (changeSet[0].previous as Record<string, unknown>).owner = "MUTATED-COMMIT";
+        return "vetoed after mutating"; // veto → rollback restores truth
+      },
+    });
+
+    const tx = opt.transaction();
+    tx.set("account", "1", { id: "1", balance: 0, owner: "danny" });
+    expect(() => tx.commit()).toThrow(PolicyVetoError);
+
+    // Restored server truth is pristine — no gate mutation leaked in
+    expect(store.get("account", "1").value).toEqual({ id: "1", balance: 100, owner: "danny" });
     off();
   });
 

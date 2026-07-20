@@ -70,6 +70,11 @@ export type GateVerdict = boolean | string;
  *
  * Gates only see TRANSACTIONAL writes — the ordinary store API bypasses
  * transactions entirely and is not policed here.
+ *
+ * Rollback REPLAY does not re-run `willApply`: replayed mutations already
+ * passed the gate at proposal time, and vetoing mid-restore (from an
+ * unrelated transaction's rollback) would have no coherent recovery path.
+ * The owning transaction's own `willCommit` still gates it at settlement.
  */
 export interface PolicyGate {
   willApply?(change: ProposedWrite, ctx: { transactionId: string }): GateVerdict;
@@ -236,12 +241,15 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
     return null;
   }
 
+  // Gates are the third-party extension point — never hand them live
+  // references into the replay log or serverTruth (a mutating gate would
+  // corrupt the rollback source of truth). Shallow copies throughout.
   function toProposedWrite(m: OptimisticMutation): ProposedWrite {
     return {
       entityType: m.entityType,
       id: m.id,
       type: m.type,
-      data: m.data,
+      data: m.data ? { ...m.data } : undefined,
       previous: store.has(m.entityType, m.id)
         ? { ...store.get(m.entityType, m.id).value! }
         : undefined,
@@ -387,20 +395,27 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
         const idx = activeTransactions.indexOf(txEntry);
         if (idx === -1) return; // already committed/rolled back
 
-        // Last-chance willCommit over the full change set (ADR-007 §2).
-        // `previous` here is the pre-transaction snapshot (what rollback
-        // would restore), so gates see the transaction's net old → new.
+        // Last-chance willCommit over the NET change set (ADR-007 §2): one
+        // entry per entity, last mutation wins, `previous` = the
+        // pre-transaction snapshot (what rollback would restore) — so a
+        // predicate like Σ(new − previous) counts each entity once instead
+        // of once per intermediate write. Copies, never live references.
         // Veto → settle as rollback (0.3 guarantees disk untouched), then
         // fail visibly.
         if (gates.size > 0) {
-          const changeSet: ProposedWrite[] = mutations.map((m) => ({
-            entityType: m.entityType,
-            id: m.id,
-            type: m.type,
-            data: m.data,
-            previous: serverTruth.get(entityKey(m.entityType, m.id))?.data,
-          }));
-          const veto = checkCommit(changeSet, transactionId);
+          const netByKey = new Map<string, ProposedWrite>();
+          for (const m of mutations) {
+            const key = entityKey(m.entityType, m.id);
+            const truth = serverTruth.get(key);
+            netByKey.set(key, {
+              entityType: m.entityType,
+              id: m.id,
+              type: m.type,
+              data: m.data ? { ...m.data } : undefined,
+              previous: truth?.data ? { ...truth.data } : undefined,
+            });
+          }
+          const veto = checkCommit([...netByKey.values()], transactionId);
           if (veto) {
             doRollback();
             throw new PolicyVetoError("commit", transactionId, veto.reason);
