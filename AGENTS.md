@@ -8,11 +8,12 @@ The standalone engine extracted from `pinia-colada-plugin-normalizer` (decision:
 
 ## Extraction state (chips)
 
-1. ✅ **Chip 1 (2026-07-19):** framework-free modules moved — `store`, `types` (engine subset), `persist`, `pagination`, `engines/*`, `sqlite-worker` + their specs (80 tests). Core imports `@vue/reactivity` directly (peer), never `vue`.
-2. ⬜ **Chip 2:** extract `normalize`/`denormalize` + helpers out of the plugin's `plugin.ts` into the engine (they are already pure functions); `NormalizationResult` is here waiting for them. Branding pass on symbol descriptions.
-3. ⬜ **Chip 3:** plugin swaps its internal engine copy for a `colada-db` dependency. Public API unchanged; existing plugin users see nothing.
+1. ✅ **Chip 1 (2026-07-19):** framework-free modules moved — `store`, `types` (engine subset), `persist`, `pagination`, `engines/*`, `sqlite-worker` + specs.
+2. ✅ **Chip 2 (2026-07-19):** `normalize`/`denormalize` + helpers in `src/normalize.ts`.
+3. ✅ **Chip 2.5 (2026-07-19):** optimistic transactions (`src/transactions.ts`) + coalescer (`src/coalesce.ts`) in core. ⚠️ One-handle-per-store is currently a doc contract, not enforced (arch review H3) — see roadmap Phase 0.6.
+4. ⬜ **Chip 3:** plugin swaps its internal engine copy for a `colada-db` dependency (GATED on npm publish / git-dep). ⚠️ Collides with persisted-format branding (`__pcn_ref`, `pcn_entities`) — the migration decision (arch review C4) must land first. The chip-3 plugin wrapper must share ONE optimistic-updates handle per store (the current per-call composable is a live bug).
 
-Stage-2 primitives (Linear DAN-577: origin tags, PRE-apply `willCommit` policy gate, capped+redacting history store, enriched schema registry) are built HERE, not in the plugin.
+**Master plan:** `../ROADMAP-TO-PUBLISH.md` (phases 0–4; Phase 0 = the durability seam — read `../REVIEW-ARCH-2026-07-19.md` before touching store/persist/transactions). Stage-2 primitives (DAN-577) build HERE, not in the plugin, on the Phase-0-frozen event shape.
 
 ## Rules
 
