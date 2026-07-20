@@ -34,11 +34,14 @@ export { sqliteEngine } from "./engines/sqlite";
 export type { SqliteEngine, SqliteEngineOptions } from "./engines/sqlite";
 
 // ─── Optimistic transactions ───
-export { createOptimisticUpdates } from "./transactions";
+export { createOptimisticUpdates, PolicyVetoError } from "./transactions";
 export type {
   OptimisticTransaction,
   OptimisticUpdates,
   TransactionSettledEvent,
+  PolicyGate,
+  ProposedWrite,
+  GateVerdict,
 } from "./transactions";
 
 // ─── Real-time coalescing ───
