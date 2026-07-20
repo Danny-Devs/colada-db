@@ -44,6 +44,15 @@ export type {
   GateVerdict,
 } from "./transactions";
 
+// ─── Schema export (machine-legible registry, ADR-007 §4) ───
+export { exportSchema } from "./schema";
+export type {
+  ColadaDbSchema,
+  ExportedEntitySchema,
+  ExportedField,
+  ExportedRelation,
+} from "./schema";
+
 // ─── History (capped field-level change log, ADR-007 §3) ───
 export { enableHistory, createWriteIdGenerator } from "./history";
 export type { HistoryStore, HistoryEntry, HistoryOptions } from "./history";

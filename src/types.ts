@@ -500,6 +500,35 @@ export interface EntityDefinition<T extends EntityRecord = EntityRecord> {
    * })
    */
   merge?: (existing: T, incoming: T) => T;
+
+  // ── Declared schema metadata (ADR-007 §4) ──────────────────────────
+  // TypeScript types are erased at runtime, so a machine-legible schema
+  // (devtools, docs generation, the MCP agent surface) can only export
+  // what is DECLARED here. All optional — undeclared types still export
+  // a minimal entry.
+
+  /** Human/agent-readable description of this entity type. */
+  description?: string;
+
+  /**
+   * Declared field types — a JSON-ish vocabulary (`"string"`, `"number"`,
+   * `"boolean"`, `"object"`, `"array"`, or any domain word you choose);
+   * the export passes it through verbatim.
+   */
+  fields?: Record<string, string | { type: string; description?: string }>;
+
+  /**
+   * Declared relations: which fields hold EntityRefs to other types.
+   * `many: true` marks array-of-refs fields.
+   */
+  relations?: Record<string, { entity: string; many?: boolean; description?: string }>;
+
+  /**
+   * Local-only flag: this type never syncs to a server (device state,
+   * drafts, UI preferences). Consumed by Stage-3 sync and surfaced to
+   * agents so they know what leaves the device.
+   */
+  local?: boolean;
 }
 
 /**
