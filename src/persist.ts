@@ -168,8 +168,12 @@ export async function requestDurableStorage(): Promise<boolean> {
  *
  * **Semantics:** `remove` events delete the durable row; `evict` events
  * (cache GC) keep it — evicted entities re-hydrate next session (ADR-004).
- * `store.clear()` emits a `remove` per entity, so a full reset clears the
- * durable copies too.
+ * `store.clear()` emits a `remove` per RESIDENT entity, so a reset clears
+ * their durable copies too — but only what memory holds: in manifest mode,
+ * durable-but-cold rows, scope manifests, and the index all survive a
+ * `clear()`, and the coordinator's retention bookkeeping is not reset.
+ * Full erasure semantics (logout flows) are tracked in DAN-602 — until it
+ * lands, treat `clear()` as a projection reset, not a disk wipe.
  *
  * **Optimistic writes never touch disk until commit:** events carrying a
  * `transactionId` are buffered per-transaction; commit graduates the

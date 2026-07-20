@@ -44,6 +44,8 @@ Coordinator keeps `scopeRetentions: Map<scopeId, Set<EntityKey>>`; a key retaine
 - **Type enumeration reflects the projection, not the DB** — any API that walks the memory store (`getByType`-style, indexes, boundary snapshots) sees only hydrated entities; durable-but-cold rows are invisible until a scope pulls them in.
 - **=== stability ends at evict** — re-hydration materializes new object identity (JSON round-trip). Within-session referential stability (Dexie #2034 suite) is unaffected because eviction of retained entities never happens; the boundary only bites evict→rehydrate cycles.
 - **First paint without `preload`** — a durable-but-cold entity fails the synchronous `store.has` check, so redirect/placeholder paths show pending until hydration lands. Accepted; `preload` exists precisely to move that ahead of mount.
+- **`clear()` is a projection reset, not a disk wipe** (review A1, 2026-07-19) — it removes resident entities and their durable rows, but cold rows, scope manifests, and the index survive, and coordinator retention bookkeeping desyncs. The behavior decision (erasure authority vs projection semantics) belongs to DAN-602's erasure spec; until then, logout flows should `removeManifest` every scope before `clear()`.
+- **Shrinking a scope releases pins but does not sweep** — `setManifest` with fewer keys releases the dropped keys' retentions immediately, but eviction waits for the next `removeManifest`-triggered sweep. Deliberate: sweeps fire on scope death, not on every mapping change.
 
 ## Tests that define done (core)
 
