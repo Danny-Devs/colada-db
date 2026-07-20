@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>colada-db playground — query-driven hydration (DAN-578)</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0; padding: 2rem; background: #0d1117; color: #e6edf3;
+        font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      h1 { font-size: 1.1rem; letter-spacing: 0.02em; }
+      h1 span { color: #7ee787; }
+      #status { margin: 0.75rem 0 1.25rem; padding: 0.4rem 0.8rem; border-radius: 6px;
+        display: inline-block; background: #1f2937; }
+      #status.done-pass { background: #033a16; color: #7ee787; }
+      #status.done-fail { background: #4c0519; color: #ff7b72; }
+      .row { padding: 0.45rem 0.75rem; border-left: 3px solid #30363d; margin: 0.35rem 0;
+        background: #161b22; border-radius: 0 6px 6px 0; white-space: pre-wrap; }
+      .row.pass { border-left-color: #2ea043; }
+      .row.fail { border-left-color: #f85149; }
+      .row .name { font-weight: 700; }
+      .row .detail { color: #8b949e; }
+    </style>
+  </head>
+  <body>
+    <h1>colada-db <span>playground</span> — 10K entities on OPFS SQLite, manifest hydration</h1>
+    <div id="status">BOOTING…</div>
+    <div id="results"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
