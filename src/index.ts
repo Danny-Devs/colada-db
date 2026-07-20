@@ -44,6 +44,10 @@ export type {
   GateVerdict,
 } from "./transactions";
 
+// ─── History (capped field-level change log, ADR-007 §3) ───
+export { enableHistory, createWriteIdGenerator } from "./history";
+export type { HistoryStore, HistoryEntry, HistoryOptions } from "./history";
+
 // ─── Real-time coalescing ───
 export { createCoalescer } from "./coalesce";
 
