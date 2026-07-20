@@ -61,4 +61,6 @@ export type {
   EntityDefinition,
   EntityRef,
   NormalizationResult,
+  WriteOrigin,
+  WriteMeta,
 } from "./types";

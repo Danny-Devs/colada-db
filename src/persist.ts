@@ -328,8 +328,14 @@ export function enablePersistence(
           // Fresh-wins: skip entities already in memory (e.g., from a server
           // fetch that completed before the engine finished loading).
           // Existence-based until engines populate row versions (ADR-005).
+          // Stamped `hydration` (ADR-007 §1): this coordinator OWNS the
+          // privileged origin — undo stacks skip these, sync must not echo
+          // them, history attributes them. (Persistence's own subscriber
+          // ignores them via isHydrating regardless.)
           if (!store.has(entityType, id)) {
-            store.set(entityType, id, decodeEntityRefs(row.data) as EntityRecord);
+            store.runWith({ origin: "hydration" }, () =>
+              store.set(entityType, id, decodeEntityRefs(row.data) as EntityRecord),
+            );
           }
         }
       } finally {
