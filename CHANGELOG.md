@@ -1,5 +1,10 @@
 # Changelog
 
+## [2026-07-19] — subscription boundary (ADR-008 §3)
+
+- [feat] `createStoreBoundary(store)` in `src/boundary.ts` — the adapter-facing contract: global / per-type / per-entity listeners fanned out from one store subscription, monotonic `getVersion()` as the external-store snapshot (no tick on no-op writes), `has()`-guarded snapshot reads that never mint phantom refs, per-listener error isolation, `dispose()`. 9 tests incl. the `useSyncExternalStore`-shaped vanilla-consumer contract test. 113 total green; typecheck/build/lint clean.
+- [chore] DAN-577 re-targeted to this repo via Linear comment; discovered prerequisite chip 2.5 (optimistic-transaction system must move from plugin `composables.ts` into core before the pre-apply gate can wrap it).
+
 ## [2026-07-19] — ADR-008 design verdict + chip-2 normalization engine
 
 - [feat] Chip 2: `normalize`/`denormalize` + helpers (`identifyEntity`, `splitEntityKey`, `writeEntitiesToStore`, walkers) extracted verbatim from the plugin's `plugin.ts` into `src/normalize.ts`; `normalize.spec.ts` came along. 104 tests green; typecheck/build/lint clean.
