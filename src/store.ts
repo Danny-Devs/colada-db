@@ -161,15 +161,36 @@ export function createEntityStore(): EntityStore {
   // single-threaded writes make a simple stack-discipline variable safe.
   let writeMeta: { origin?: string; transactionId?: string } | null = null;
 
+  // Event drain queue (arch review H5): a listener that WRITES to the store
+  // (transaction replay, indexes, a future history store) must not cause
+  // nested delivery — consumers reconstructing state from the stream would
+  // observe causally-inverted order. Events emitted while a delivery is in
+  // progress are queued and delivered after the current event's listeners
+  // finish — still fully synchronous within the outermost write call.
+  const eventQueue: EntityEvent[] = [];
+  let draining = false;
+
   function emit(event: EntityEvent): void {
+    // Stamp channel meta at emission time — writeMeta is call-stack-scoped,
+    // so it must be captured before the event is queued.
     if (writeMeta) {
       if (writeMeta.origin !== undefined) event.origin = writeMeta.origin;
       if (writeMeta.transactionId !== undefined) event.transactionId = writeMeta.transactionId;
     }
-    for (const listener of listeners) {
-      if (!listener.filter?.entityType || listener.filter.entityType === event.entityType) {
-        listener.fn(event);
+    eventQueue.push(event);
+    if (draining) return;
+    draining = true;
+    try {
+      while (eventQueue.length > 0) {
+        const next = eventQueue.shift()!;
+        for (const listener of listeners) {
+          if (!listener.filter?.entityType || listener.filter.entityType === next.entityType) {
+            listener.fn(next);
+          }
+        }
       }
+    } finally {
+      draining = false;
     }
   }
 
@@ -296,8 +317,13 @@ export function createEntityStore(): EntityStore {
     },
 
     setMany(entities) {
-      // Batch: group by type, minimize version bumps
+      // Batch: group by type, minimize version bumps.
+      // Uniform consistency rule (arch review H5): ALL state — entity maps
+      // AND type versions — is settled BEFORE the first event is delivered,
+      // so a listener reading getByType() at event time sees fresh data,
+      // exactly as it would for a single set().
       const typesWithNewEntities = new Set<string>();
+      const pendingEvents: EntityEvent[] = [];
 
       for (const { entityType, id, data } of entities) {
         const typeMap = getTypeMap(entityType);
@@ -316,7 +342,7 @@ export function createEntityStore(): EntityStore {
           typesWithNewEntities.add(entityType);
         }
 
-        emit({
+        pendingEvents.push({
           type: "set",
           entityType,
           id,
@@ -326,10 +352,15 @@ export function createEntityStore(): EntityStore {
         });
       }
 
-      // Bump type versions once per type, not per entity
+      // Bump type versions once per type, not per entity — BEFORE emitting
       for (const entityType of typesWithNewEntities) {
         const version = getTypeVersion(entityType);
         version.value++;
+      }
+
+      // State fully settled — now deliver
+      for (const event of pendingEvents) {
+        emit(event);
       }
     },
 

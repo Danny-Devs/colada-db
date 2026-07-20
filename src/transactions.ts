@@ -65,12 +65,28 @@ export interface OptimisticUpdates {
 }
 
 /**
- * Create an optimistic-update handle over a store. All transactions from
- * one handle share the snapshot/replay bookkeeping — create ONE handle
- * per store (concurrent transactions must see each other to interleave
- * correctly).
+ * One optimistic-updates handle per store, enforced structurally (arch
+ * review H3): concurrent transactions MUST share snapshot/replay
+ * bookkeeping — two independent handles would capture each other's
+ * optimistic state as "server truth" and corrupt on rollback.
+ */
+const handleByStore = new WeakMap<EntityStore, OptimisticUpdates>();
+
+/**
+ * Create (or retrieve) THE optimistic-update handle for a store. All
+ * transactions on one store share the snapshot/replay bookkeeping;
+ * repeated calls return the same handle — the one-handle-per-store
+ * invariant is structural, not a documentation plea.
  */
 export function createOptimisticUpdates(store: EntityStore): OptimisticUpdates {
+  const existing = handleByStore.get(store);
+  if (existing) return existing;
+  const created = buildOptimisticUpdates(store);
+  handleByStore.set(store, created);
+  return created;
+}
+
+function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
   // Server truth snapshots — captured before optimistic mutations modify an entity.
   const serverTruth = new Map<string, { existed: boolean; data?: EntityRecord }>();
 
