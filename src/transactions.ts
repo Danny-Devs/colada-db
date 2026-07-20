@@ -400,7 +400,9 @@ function buildOptimisticUpdates(store: EntityStore): OptimisticUpdates {
         // FOLDED with the store's shallow-merge semantics (a trailing
         // {note} write must not hide an earlier {balance:0} from the gate
         // — review finding F4), `previous` = the pre-transaction snapshot.
-        // Final committed state for a set = {...previous, ...data}. A
+        // Final committed state for a set = {...previous, ...data} — except
+        // after an interior remove-then-set, where the remove deleted the
+        // pre-tx fields and the folded `data` alone IS the final state. A
         // Σ(new − previous) predicate counts each entity once. Copies,
         // never live references. Veto → settle as rollback (0.3 guarantees
         // disk untouched), then fail visibly.
