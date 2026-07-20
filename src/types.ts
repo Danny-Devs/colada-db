@@ -99,6 +99,28 @@ export interface EntityEvent<T extends EntityRecord = EntityRecord> {
    * doesn't calcify before a sync backend exists (see ADR-005).
    */
   version?: string | number;
+  /**
+   * Which write CHANNEL produced this change (ADR-007 §1). Stamped via
+   * `store.runWith({ origin }, fn)` — never passed by ordinary callers, so
+   * privileged origins (`hydration`, `sync-pull`) can't be forged through
+   * the public write API. Attribution within one trust domain, not
+   * authentication. Values today: `local-mutation` and `rollback-replay`
+   * (stamped by the transaction layer); the full enum lands with Stage 2a.
+   */
+  origin?: string;
+  /**
+   * Groups the writes of one optimistic transaction. Stamped by the
+   * transaction layer via `runWith`. Downstream layers use it to hold
+   * optimistic writes out of the durable path until commit (roadmap
+   * Phase 0.3) and to correlate receipts.
+   */
+  transactionId?: string;
+}
+
+/** Write-channel metadata applied to events emitted inside `runWith`. */
+export interface WriteMeta {
+  origin?: string;
+  transactionId?: string;
 }
 
 /**
@@ -281,6 +303,20 @@ export interface EntityStore {
    * @returns Array of evicted entity keys (e.g., ['contact:42', 'order:5'])
    */
   gc(): string[];
+
+  // ── Write channel ───────────────────────────
+
+  /**
+   * Run `fn` with write-channel metadata: every event emitted by writes
+   * inside `fn` (synchronously) carries `meta.origin` / `meta.transactionId`.
+   * Nesting-safe — inner `runWith` shadows, then restores, the outer meta.
+   *
+   * This is THE mechanism by which origins are stamped (ADR-007 §1):
+   * channels (transaction layer, hydration, sync coordinator) wrap their
+   * writes; ordinary callers never touch it, so privileged origins cannot
+   * be forged through the public write API.
+   */
+  runWith<T>(meta: WriteMeta, fn: () => T): T;
 
   // ── Lifecycle ───────────────────────────────
 

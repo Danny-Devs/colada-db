@@ -77,6 +77,11 @@ export function createOptimisticUpdates(store: EntityStore): OptimisticUpdates {
   // Active transactions — maintained in order for deterministic replay
   const activeTransactions: Array<{ mutations: OptimisticMutation[] }> = [];
 
+  // Transaction identity for event attribution (write-channel, ADR-007 §1).
+  // Monotonic per handle; the Stage-3 LocalChange upgrades this to an
+  // HLC-style mutationId (ADR-006).
+  let txCounter = 0;
+
   function entityKey(entityType: string, id: string): string {
     return `${entityType}:${id}`;
   }
@@ -144,22 +149,31 @@ export function createOptimisticUpdates(store: EntityStore): OptimisticUpdates {
     }
   }
 
+  /** Rollback restoration + replay runs under its own origin so consumers
+   *  (undo stacks, history, persistence) can tell compensating writes from
+   *  fresh user intent. */
+  function recomputeAttributed(affectedKeys: Set<string>): void {
+    store.runWith({ origin: "rollback-replay" }, () => recompute(affectedKeys));
+  }
+
   function transaction(): OptimisticTransaction {
     const mutations: OptimisticMutation[] = [];
     const txEntry = { mutations };
     activeTransactions.push(txEntry);
+    const transactionId = `tx-${++txCounter}`;
+    const meta = { origin: "local-mutation", transactionId };
 
     return {
       set(entityType: string, id: string, data: EntityRecord) {
         snapshotIfNeeded(entityType, id);
         mutations.push({ entityType, id, type: "set", data });
-        store.set(entityType, id, data);
+        store.runWith(meta, () => store.set(entityType, id, data));
       },
 
       remove(entityType: string, id: string) {
         snapshotIfNeeded(entityType, id);
         mutations.push({ entityType, id, type: "remove" });
-        store.remove(entityType, id);
+        store.runWith(meta, () => store.remove(entityType, id));
       },
 
       commit() {
@@ -215,7 +229,7 @@ export function createOptimisticUpdates(store: EntityStore): OptimisticUpdates {
         activeTransactions.splice(idx, 1);
 
         // Restore server truth + replay remaining transactions
-        recompute(affectedKeys);
+        recomputeAttributed(affectedKeys);
       },
     };
   }

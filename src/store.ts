@@ -157,7 +157,15 @@ export function createEntityStore(): EntityStore {
     return `${entityType}:${id}`;
   }
 
+  // Active write-channel metadata (see EntityStore.runWith). Synchronous
+  // single-threaded writes make a simple stack-discipline variable safe.
+  let writeMeta: { origin?: string; transactionId?: string } | null = null;
+
   function emit(event: EntityEvent): void {
+    if (writeMeta) {
+      if (writeMeta.origin !== undefined) event.origin = writeMeta.origin;
+      if (writeMeta.transactionId !== undefined) event.transactionId = writeMeta.transactionId;
+    }
     for (const listener of listeners) {
       if (!listener.filter?.entityType || listener.filter.entityType === event.entityType) {
         listener.fn(event);
@@ -177,14 +185,34 @@ export function createEntityStore(): EntityStore {
    */
   function removeInternal(entityType: string, id: string, eventType: "remove" | "evict"): void {
     const typeMap = storage.get(entityType);
-    if (!typeMap) return;
+    const existing = typeMap?.get(id);
 
-    const existing = typeMap.get(id);
-    if (!existing) return;
+    if (!existing) {
+      // Memory-absent. `evict` of nothing is a true no-op (evict is a
+      // memory operation). But `remove` is an INSTRUCTION — "this entity
+      // must not exist" — and under ADR-004 the entity may exist durably
+      // while absent from memory (evicted, or a delete arriving during
+      // hydration). Emit the tombstone event regardless so persistence
+      // deletes the durable row and sync replicates the deletion.
+      // remove() is therefore idempotent-by-emission: repeated removes
+      // may emit repeatedly; downstream delete handling is idempotent.
+      // (Arch review C1 — the zombie-resurrection fix.)
+      if (eventType === "remove") {
+        emit({
+          type: "remove",
+          entityType,
+          id,
+          key: toEntityKey(entityType, id),
+          data: undefined,
+          previousData: undefined,
+        });
+      }
+      return;
+    }
 
     const previousData = existing.value;
     existing.value = undefined as unknown as EntityRecord;
-    typeMap.delete(id);
+    typeMap!.delete(id); // non-null: `existing` came from this map
 
     // Bump type version so getByType() recomputes
     const version = getTypeVersion(entityType);
@@ -505,6 +533,18 @@ export function createEntityStore(): EntityStore {
         const entityType = key.slice(0, separatorIndex);
         const id = key.slice(separatorIndex + 1);
         store.set(entityType, id, decodeEntityRefs(data) as EntityRecord);
+      }
+    },
+
+    runWith(meta, fn) {
+      // Stack discipline: nested runWith shadows, then restores, the outer
+      // meta — writes are synchronous, so a plain variable is race-free.
+      const previous = writeMeta;
+      writeMeta = meta;
+      try {
+        return fn();
+      } finally {
+        writeMeta = previous;
       }
     },
   };
