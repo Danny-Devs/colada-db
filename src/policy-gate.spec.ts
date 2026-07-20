@@ -16,6 +16,7 @@ function fastEngine() {
     isSupported: () => true,
     open: async () => {},
     loadAll: async () => [],
+    loadMany: async (keys) => keys.filter((k) => written.has(k)).map((k) => ({ key: k, data: written.get(k) })),
     async writeBatch(puts, deletes) {
       for (const { key, value } of puts) written.set(key, value);
       for (const key of deletes) written.delete(key);

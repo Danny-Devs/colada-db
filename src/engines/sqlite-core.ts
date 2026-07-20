@@ -51,6 +51,32 @@ export function loadAllRows(
   return rows;
 }
 
+/**
+ * Selective load for manifest boot / re-hydration (DAN-578). Chunked at
+ * 500 binds per statement — comfortably under every SQLITE_LIMIT_VARIABLE_NUMBER
+ * in circulation (999 historic default, 32766 modern builds).
+ */
+export function loadManyRows(
+  db: SqliteDb,
+  keys: string[],
+): Array<{ key: string; data: unknown; version: number }> {
+  const rows: Array<{ key: string; data: unknown; version: number }> = [];
+  const CHUNK = 500;
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    const chunk = keys.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    db.exec({
+      sql: `SELECT key, data, row_version FROM entities WHERE key IN (${placeholders})`,
+      bind: chunk,
+      rowMode: "object",
+      callback: (row: { key: string; data: string; row_version: number }) => {
+        rows.push({ key: row.key, data: JSON.parse(row.data), version: row.row_version });
+      },
+    });
+  }
+  return rows;
+}
+
 export function writeBatchRows(
   db: SqliteDb,
   puts: Array<{ key: string; value: unknown }>,

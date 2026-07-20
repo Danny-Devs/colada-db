@@ -17,7 +17,13 @@
  */
 
 import type { SqliteWorkerRequest, SqliteWorkerResponse } from "./engines/sqlite-protocol";
-import { initSchema, loadAllRows, writeBatchRows, type SqliteDb } from "./engines/sqlite-core";
+import {
+  initSchema,
+  loadAllRows,
+  loadManyRows,
+  writeBatchRows,
+  type SqliteDb,
+} from "./engines/sqlite-core";
 
 interface WorkerState {
   db: SqliteDb | null;
@@ -66,6 +72,10 @@ export function runSqliteWorker(): void {
       } else if (op === "loadAll") {
         if (!state.db) throw new Error("DB not open");
         respond({ ok: true, result: loadAllRows(state.db) });
+      } else if (op === "loadMany") {
+        if (!state.db) throw new Error("DB not open");
+        const { keys } = args as { keys: string[] };
+        respond({ ok: true, result: loadManyRows(state.db, keys) });
       } else if (op === "writeBatch") {
         if (!state.db) throw new Error("DB not open");
         const { puts, deletes } = args as {

@@ -32,6 +32,15 @@ export function memoryEngine(): MemoryEngine {
       }));
     },
 
+    async loadMany(keys) {
+      const out: Array<{ key: EntityKey; data: unknown; version: number }> = [];
+      for (const key of keys) {
+        const row = rows.get(key);
+        if (row) out.push({ key, data: row.data, version: row.version });
+      }
+      return out;
+    },
+
     async writeBatch(puts, deletes) {
       for (const { key, value } of puts) {
         const existing = rows.get(key);

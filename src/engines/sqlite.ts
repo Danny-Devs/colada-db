@@ -118,6 +118,11 @@ export function sqliteEngine(options: SqliteEngineOptions): SqliteEngine {
       return call<Array<{ key: EntityKey; data: unknown; version: number }>>("loadAll");
     },
 
+    loadMany(keys) {
+      if (keys.length === 0) return Promise.resolve([]);
+      return call<Array<{ key: EntityKey; data: unknown; version: number }>>("loadMany", { keys });
+    },
+
     async writeBatch(puts, deletes) {
       await call("writeBatch", { puts, deletes });
     },

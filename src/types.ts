@@ -415,6 +415,14 @@ export interface StorageEngine {
   loadAll(): Promise<Array<{ key: EntityKey; data: unknown; version?: number }>>;
 
   /**
+   * Load a specific set of rows (selective hydration — manifest boot,
+   * post-evict re-hydration, preload; DAN-578). Missing keys are OMITTED
+   * from the result, never errors. Empty input resolves `[]` without I/O.
+   * Result order is unspecified.
+   */
+  loadMany(keys: EntityKey[]): Promise<Array<{ key: EntityKey; data: unknown; version?: number }>>;
+
+  /**
    * Apply puts and deletes as one batch (atomic where supported).
    * MUST reject on failure so the coordinator can degrade gracefully.
    */

@@ -16,6 +16,7 @@ function slowEngine() {
     isSupported: () => true,
     open: async () => {},
     loadAll: async () => [],
+    loadMany: async (keys) => keys.filter((k) => written.has(k)).map((k) => ({ key: k, data: written.get(k) })),
     async writeBatch(puts, deletes) {
       await new Promise<void>((r) => releases.push(r));
       for (const { key, value } of puts) written.set(key, value);
@@ -48,6 +49,7 @@ function fastEngine() {
     isSupported: () => true,
     open: async () => {},
     loadAll: async () => [],
+    loadMany: async (keys) => keys.filter((k) => written.has(k)).map((k) => ({ key: k, data: written.get(k) })),
     async writeBatch(puts, deletes) {
       if (closed) throw new Error("write after close");
       for (const { key, value } of puts) written.set(key, value);

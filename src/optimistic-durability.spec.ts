@@ -21,6 +21,7 @@ function recordingEngine(seed: Array<{ key: string; data: unknown }> = []) {
     isSupported: () => true,
     open: async () => {},
     loadAll: async () => seed.map((r) => ({ key: r.key as EntityKey, data: r.data })),
+    loadMany: async (keys) => keys.filter((k) => rows.has(k)).map((k) => ({ key: k, data: rows.get(k) })),
     async writeBatch(puts, deletes) {
       writeLog.push({ puts: puts.map((p) => p.key), deletes: [...deletes] });
       for (const { key, value } of puts) rows.set(key, value);
