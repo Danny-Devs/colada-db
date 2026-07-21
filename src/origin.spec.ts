@@ -37,6 +37,7 @@ describe("origin attribution — every write path carries its channel", () => {
       isSupported: () => true,
       open: async () => {},
       loadAll: async () => [{ key: "contact:1" as EntityKey, data: { id: "1", name: "durable" } }],
+      loadMany: async () => [],
       writeBatch: async () => {},
       close() {},
     };

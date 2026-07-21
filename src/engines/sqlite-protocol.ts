@@ -6,7 +6,7 @@
 
 export interface SqliteWorkerRequest {
   id: number;
-  op: "open" | "loadAll" | "writeBatch" | "close";
+  op: "open" | "loadAll" | "loadMany" | "writeBatch" | "close";
   args?: unknown;
 }
 

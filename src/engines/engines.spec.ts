@@ -5,7 +5,13 @@ import { idbEngine } from "./idb";
 import { memoryEngine } from "./memory";
 import { createEntityStore } from "../store";
 import { enablePersistence } from "../persist";
-import { initSchema, loadAllRows, writeBatchRows, type SqliteDb } from "./sqlite-core";
+import {
+  initSchema,
+  loadAllRows,
+  loadManyRows,
+  writeBatchRows,
+  type SqliteDb,
+} from "./sqlite-core";
 
 // ─────────────────────────────────────────────
 // StorageEngine contract suite
@@ -31,6 +37,27 @@ function engineContract(name: string, makeEngine: () => StorageEngine) {
       const byKey = new Map(rows.map((r) => [r.key, r.data]));
       expect(byKey.get("contact:1")).toEqual({ id: "1", name: "Alice" });
       expect(byKey.get("order:5")).toEqual({ id: "5", total: 100 });
+      engine.close();
+    });
+
+    it("loadMany: subset load, missing keys omitted, empty input resolves []", async () => {
+      const engine = makeEngine();
+      await engine.open();
+      await engine.writeBatch(
+        [
+          { key: "contact:1", value: { id: "1" } },
+          { key: "contact:2", value: { id: "2" } },
+          { key: "order:9", value: { id: "9" } },
+        ],
+        [],
+      );
+
+      const rows = await engine.loadMany(["contact:2", "contact:missing", "order:9"]);
+      const keys = rows.map((r) => r.key).sort();
+      expect(keys).toEqual(["contact:2", "order:9"]); // missing omitted, no error
+      expect(rows.find((r) => r.key === "contact:2")?.data).toEqual({ id: "2" });
+
+      expect(await engine.loadMany([])).toEqual([]);
       engine.close();
     });
 
@@ -233,6 +260,25 @@ describe.skipIf(sqliteDb === null)("sqlite-core (real sqlite-wasm, :memory:)", (
 
     writeBatchRows(db, [], ["contact:1"], 4000);
     expect(loadAllRows(db).map((r) => r.key)).toEqual(["order:5"]);
+  });
+
+  it("loadManyRows chunks past 500 binds without dropping rows", () => {
+    const db = sqliteDb!;
+    initSchema(db);
+
+    const puts = Array.from({ length: 1200 }, (_, i) => ({
+      key: `bulk:${i}`,
+      value: { id: String(i), n: i },
+    }));
+    writeBatchRows(db, puts, [], 5000);
+
+    // 1201 requested keys (1200 present + 1 missing) spans 3 chunks of 500
+    const requested = [...puts.map((p) => p.key), "bulk:missing"];
+    const rows = loadManyRows(db, requested);
+    expect(rows).toHaveLength(1200);
+    expect(rows.find((r) => r.key === "bulk:777")?.data).toEqual({ id: "777", n: 777 });
+
+    writeBatchRows(db, [], puts.map((p) => p.key), 6000); // clean up for later tests
   });
 
   it("a failing batch applies nothing (transaction atomicity)", () => {

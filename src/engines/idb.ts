@@ -117,6 +117,25 @@ export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
       });
     },
 
+    loadMany(keys) {
+      if (keys.length === 0) return Promise.resolve([]);
+      return new Promise((resolve, reject) => {
+        if (!db) return reject(new Error("IDB engine not open"));
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const rows: Array<{ key: EntityKey; data: unknown }> = [];
+        for (const key of keys) {
+          const req = store.get(key);
+          req.onsuccess = () => {
+            // Missing keys resolve undefined — omitted per the contract.
+            if (req.result !== undefined) rows.push({ key, data: req.result });
+          };
+        }
+        tx.oncomplete = () => resolve(rows);
+        tx.onerror = () => reject(tx.error);
+      });
+    },
+
     writeBatch(puts, deletes) {
       return new Promise((resolve, reject) => {
         if (!db) {

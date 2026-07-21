@@ -26,6 +26,31 @@ import { createOptimisticUpdates, type TransactionSettledEvent } from "./transac
 // Types
 // ─────────────────────────────────────────────
 
+// ─────────────────────────────────────────────
+// Manifest namespace (DAN-578, docs/design/query-driven-hydration.md)
+// ─────────────────────────────────────────────
+// Scope→entityKeys manifests live in the SAME engine KV table as entities,
+// under a reserved type prefix — zero engine schema changes; the
+// coordinator owns the semantics (ADR-003 division). `__cdb_manifest__`
+// is a RESERVED entity type: never use it for real entities.
+
+const MANIFEST_PREFIX = "__cdb_manifest__:";
+const INDEX_KEY = `${MANIFEST_PREFIX}__index__` as EntityKey;
+
+function manifestKey(scopeId: string): EntityKey {
+  return `${MANIFEST_PREFIX}${scopeId}` as EntityKey;
+}
+
+interface ManifestRow {
+  v: 1;
+  keys: EntityKey[];
+}
+
+interface ManifestIndexRow {
+  v: 1;
+  scopes: string[];
+}
+
 export interface PersistenceOptions {
   /**
    * Storage engine to persist into.
@@ -53,6 +78,18 @@ export interface PersistenceOptions {
    * @default false
    */
   requestDurable?: boolean;
+  /**
+   * Boot hydration strategy (DAN-578):
+   *
+   * - `"all"` (default) — `loadAll()` and hydrate every durable row.
+   *   Unchanged legacy semantics; right for small datasets.
+   * - `"manifest"` — hydrate ONLY entities referenced by persisted scope
+   *   manifests (see `setManifest`), each retained under its scope so
+   *   `gc()` can never evict what a live scope needs. Unreferenced rows
+   *   stay durable-but-cold and page in via `hydrateScope`/`preload`.
+   *   Memory becomes a true projection of the DB (ADR-003 at scale).
+   */
+  hydration?: "all" | "manifest";
 }
 
 export interface PersistenceHandle {
@@ -66,6 +103,34 @@ export interface PersistenceHandle {
   durable: Promise<boolean>;
   /** Force-flush pending writes to the engine immediately. */
   flush(): Promise<void>;
+  /**
+   * Persist (or replace) a scope's manifest: the set of entity keys this
+   * scope needs resident. Adapters call this whenever a query's entity
+   * mapping changes (plugin: on NORM_META update). Rides the normal write
+   * flush; kept on evict; next manifest-mode boot hydrates exactly these.
+   * Does NOT retain at runtime — retention of freshly-fetched entities is
+   * the adapter's concern; boot/hydrateScope/preload retention is ours.
+   */
+  setManifest(scopeId: string, keys: EntityKey[]): void;
+  /**
+   * Delete a scope's manifest, release every retention this coordinator
+   * holds under it, and schedule the debounced `gc()` sweep — THE trigger
+   * that makes eviction actually happen (nothing else calls `gc()`).
+   */
+  removeManifest(scopeId: string): void;
+  /**
+   * Re-hydrate a scope's entities from the engine via `loadMany` (the
+   * post-evict remount path). Loads only keys absent from memory; retains
+   * every scope key. Resolves to the number of entities hydrated.
+   */
+  hydrateScope(scopeId: string): Promise<number>;
+  /**
+   * Warm scopes ahead of use (router hook, pre-mount). No arguments =
+   * every scope in the persisted index. Without `preload`, first paint on
+   * a durable-but-cold entity shows pending — the synchronous `store.has`
+   * redirect check cannot see disk (documented boundary).
+   */
+  preload(scopeIds?: string[]): Promise<number>;
   /** Unsubscribe from store changes and release the engine. */
   dispose(): void;
 }
@@ -103,8 +168,12 @@ export async function requestDurableStorage(): Promise<boolean> {
  *
  * **Semantics:** `remove` events delete the durable row; `evict` events
  * (cache GC) keep it — evicted entities re-hydrate next session (ADR-004).
- * `store.clear()` emits a `remove` per entity, so a full reset clears the
- * durable copies too.
+ * `store.clear()` emits a `remove` per RESIDENT entity, so a reset clears
+ * their durable copies too — but only what memory holds: in manifest mode,
+ * durable-but-cold rows, scope manifests, and the index all survive a
+ * `clear()`, and the coordinator's retention bookkeeping is not reset.
+ * Full erasure semantics (logout flows) are tracked in DAN-602 — until it
+ * lands, treat `clear()` as a projection reset, not a disk wipe.
  *
  * **Optimistic writes never touch disk until commit:** events carrying a
  * `transactionId` are buffered per-transaction; commit graduates the
@@ -139,6 +208,7 @@ export function enablePersistence(
     onReady,
     onError,
     requestDurable = false,
+    hydration = "all",
   } = options;
 
   // ── State ──────────────────────────────────
@@ -159,12 +229,32 @@ export function enablePersistence(
   let disposed = false;
   let flushing = false;
 
+  // ── Scope retention bookkeeping (DAN-578) ──
+  // Keys this coordinator has retained, per scope. A key referenced by N
+  // scopes carries N refcounts (store refcounts sum); releaseScope gives
+  // back exactly what THIS coordinator took, never the adapter's own.
+  const scopeRetentions = new Map<string, Set<EntityKey>>();
+  // Live index mirror. Seeded from the PERSISTED index at boot (both
+  // modes) and merged with pre-boot setManifest calls — never written
+  // eagerly (review B1: an eager snapshot taken before boot seeding
+  // clobbered prior sessions' scopes). The index row is computed lazily
+  // at flush time from this Set.
+  const manifestScopes = new Set<string>();
+  const removedPreBoot = new Set<string>(); // removeManifest before boot seeding
+  let indexDirty = false;
+  let indexSeeded = false;
+  let gcTimer: ReturnType<typeof setTimeout> | null = null;
+
   // ── Environment guard (SSR etc.) ───────────
   if (!engine.isSupported()) {
     return {
       ready: Promise.resolve(),
       durable: Promise.resolve(false),
       flush: () => Promise.resolve(),
+      setManifest: () => {},
+      removeManifest: () => {},
+      hydrateScope: () => Promise.resolve(0),
+      preload: () => Promise.resolve(0),
       dispose: () => {},
     };
   }
@@ -275,7 +365,16 @@ export function enablePersistence(
       await inflightFlush;
       return flush();
     }
-    if (dirtySaves.size === 0 && dirtyDeletes.size === 0) return;
+    if (dirtySaves.size === 0 && dirtyDeletes.size === 0 && !indexDirty) return;
+
+    // Materialize the manifest index row NOW, from the live mirror —
+    // lazy so pre-boot writes can never snapshot a half-seeded index
+    // (review B1).
+    if (indexDirty) {
+      const row: ManifestIndexRow = { v: 1, scopes: [...manifestScopes] };
+      dirtySaves.set(INDEX_KEY, row);
+      indexDirty = false;
+    }
 
     flushing = true;
     const puts = Array.from(dirtySaves.entries()).map(([key, value]) => ({ key, value }));
@@ -304,7 +403,123 @@ export function enablePersistence(
     }
   }
 
-  // ── Hydration ──────────────────────────────
+  // ── Hydration machinery ────────────────────
+
+  /**
+   * Hydrate one engine row into memory. Fresh-wins: skips entities already
+   * in memory (e.g., a server fetch that beat the engine open) —
+   * existence-based until engines populate row versions (ADR-005).
+   * Stamped `hydration` (ADR-007 §1): this coordinator OWNS the privileged
+   * origin — undo stacks skip these, sync must not echo them, history
+   * attributes them. (Persistence's own subscriber ignores them via
+   * isHydrating regardless.) Returns true if a write happened.
+   */
+  function hydrateRow(row: { key: EntityKey; data: unknown }): boolean {
+    const key = row.key;
+    const separatorIndex = key.indexOf(":");
+    if (separatorIndex === -1) return false;
+    const entityType = key.slice(0, separatorIndex);
+    const id = key.slice(separatorIndex + 1);
+    if (store.has(entityType, id)) return false;
+    store.runWith({ origin: "hydration" }, () =>
+      store.set(entityType, id, decodeEntityRefs(row.data) as EntityRecord),
+    );
+    return true;
+  }
+
+  /** Retain `key` under `scopeId` (idempotent per scope+key). */
+  function retainUnder(scopeId: string, key: EntityKey): void {
+    let keys = scopeRetentions.get(scopeId);
+    if (!keys) {
+      keys = new Set();
+      scopeRetentions.set(scopeId, keys);
+    }
+    if (keys.has(key)) return;
+    const separatorIndex = key.indexOf(":");
+    if (separatorIndex === -1) return;
+    store.retain(key.slice(0, separatorIndex), key.slice(separatorIndex + 1));
+    keys.add(key);
+  }
+
+  /** Release a single key held under `scopeId` (no-op if not held). */
+  function releaseKey(scopeId: string, key: EntityKey): void {
+    const keys = scopeRetentions.get(scopeId);
+    if (!keys?.has(key)) return;
+    keys.delete(key);
+    const separatorIndex = key.indexOf(":");
+    if (separatorIndex === -1) return;
+    store.release(key.slice(0, separatorIndex), key.slice(separatorIndex + 1));
+  }
+
+  /** Release every retention held under `scopeId`. */
+  function releaseScope(scopeId: string): void {
+    const keys = scopeRetentions.get(scopeId);
+    if (!keys) return;
+    scopeRetentions.delete(scopeId);
+    for (const key of keys) {
+      const separatorIndex = key.indexOf(":");
+      if (separatorIndex === -1) continue;
+      store.release(key.slice(0, separatorIndex), key.slice(separatorIndex + 1));
+    }
+  }
+
+  /**
+   * THE gc trigger (audit item: `gc()` is otherwise never invoked).
+   * Debounced so a burst of removeManifest calls sweeps once.
+   *
+   * The sweep FLUSHES FIRST (review B2): evict drops an entity's pending
+   * save (ADR-004 — "the last flushed value stands"), so sweeping before
+   * flush would destroy the only copy of an unflushed write, from memory
+   * AND disk. Never sweeps in degraded mode (review A3): with the engine
+   * dead, memory is the ONLY copy — evict-is-safe doesn't hold.
+   */
+  function scheduleGcSweep(): void {
+    if (gcTimer || disposed || disabled) return;
+    gcTimer = setTimeout(() => {
+      gcTimer = null;
+      void flush()
+        .catch(() => {})
+        .then(() => {
+          if (!disposed && !disabled) store.gc();
+        });
+    }, writeDebounce);
+  }
+
+  /**
+   * Mark the manifest index dirty. The row itself is materialized at
+   * flush time from the live `manifestScopes` — never snapshotted here
+   * (review B1: pre-boot snapshots clobbered prior sessions' scopes).
+   */
+  function markIndexDirty(): void {
+    indexDirty = true;
+    dirtyDeletes.delete(INDEX_KEY);
+  }
+
+  /** Seed the live index mirror from the persisted index (once, at boot). */
+  function seedIndex(scopes: string[]): void {
+    for (const s of scopes) {
+      if (!removedPreBoot.has(s)) manifestScopes.add(s);
+    }
+    indexSeeded = true;
+    removedPreBoot.clear();
+  }
+
+  /**
+   * Read a manifest row: pending state wins over the engine — including
+   * pending DELETES (review B4: a removeManifest inside the debounce
+   * window must make the scope unreadable immediately, or a remount
+   * hydrateScope resurrects retention under a dead scope).
+   */
+  async function readManifestRow(scopeId: string): Promise<ManifestRow | null> {
+    const key = manifestKey(scopeId);
+    if (dirtyDeletes.has(key)) return null;
+    const pending = dirtySaves.get(key);
+    if (pending) return pending as ManifestRow;
+    const rows = await engine.loadMany([key]);
+    return rows.length > 0 ? (rows[0].data as ManifestRow) : null;
+  }
+
+  // ── Boot ───────────────────────────────────
   const ready = engine
     .open()
     .then(async () => {
@@ -316,27 +531,57 @@ export function enablePersistence(
 
       isHydrating = true;
       try {
-        const rows = await engine.loadAll();
-        for (const row of rows) {
-          const key = row.key;
-          const separatorIndex = key.indexOf(":");
-          if (separatorIndex === -1) continue;
+        // Post-await `disposed` re-checks throughout (review B3): a
+        // dispose() racing boot must not hydrate or retain afterward —
+        // refcounts must never outlive the coordinator.
+        if (hydration === "manifest") {
+          // Selective boot: index → scope rows → referenced entities.
+          // Never calls loadAll; unreferenced rows stay durable-but-cold.
+          const indexRows = await engine.loadMany([INDEX_KEY]);
+          if (disposed) return;
+          const persisted =
+            indexRows.length > 0 ? (indexRows[0].data as ManifestIndexRow).scopes : [];
+          const bootScopes = persisted.filter((s) => !removedPreBoot.has(s));
+          seedIndex(persisted);
 
-          const entityType = key.slice(0, separatorIndex);
-          const id = key.slice(separatorIndex + 1);
-
-          // Fresh-wins: skip entities already in memory (e.g., from a server
-          // fetch that completed before the engine finished loading).
-          // Existence-based until engines populate row versions (ADR-005).
-          // Stamped `hydration` (ADR-007 §1): this coordinator OWNS the
-          // privileged origin — undo stacks skip these, sync must not echo
-          // them, history attributes them. (Persistence's own subscriber
-          // ignores them via isHydrating regardless.)
-          if (!store.has(entityType, id)) {
-            store.runWith({ origin: "hydration" }, () =>
-              store.set(entityType, id, decodeEntityRefs(row.data) as EntityRecord),
-            );
+          const scopeRows = await engine.loadMany(bootScopes.map(manifestKey));
+          if (disposed) return;
+          const keysByScope = new Map<string, EntityKey[]>();
+          const union = new Set<EntityKey>();
+          for (const row of scopeRows) {
+            const scopeId = row.key.slice(MANIFEST_PREFIX.length);
+            const keys = (row.data as ManifestRow).keys;
+            keysByScope.set(scopeId, keys);
+            for (const k of keys) union.add(k);
           }
+
+          const entityRows = await engine.loadMany([...union]);
+          if (disposed) return;
+          for (const row of entityRows) hydrateRow(row);
+          // Retention AFTER hydration: every scope retains every key it
+          // references — including fresh-wins keys already in memory (the
+          // scope needs them resident either way). This is the residency-
+          // ratchet fix: hydrated ≠ immortal; unreferenced = evictable.
+          for (const [scopeId, keys] of keysByScope) {
+            for (const key of keys) retainUnder(scopeId, key);
+          }
+        } else {
+          const rows = await engine.loadAll();
+          if (disposed) return;
+          for (const row of rows) {
+            // Manifest rows are coordinator state, never entities — filter
+            // so switching modes can't mint phantom `__cdb_manifest__`s.
+            // The index row seeds the live mirror even in "all" mode, so
+            // this session's setManifest calls MERGE with prior sessions
+            // instead of clobbering them (review B1).
+            if (row.key === INDEX_KEY) {
+              seedIndex((row.data as ManifestIndexRow).scopes);
+              continue;
+            }
+            if (row.key.startsWith(MANIFEST_PREFIX)) continue;
+            hydrateRow(row);
+          }
+          if (!indexSeeded) seedIndex([]); // no index row on disk yet
         }
       } finally {
         isHydrating = false;
@@ -376,6 +621,89 @@ export function enablePersistence(
     window.addEventListener("beforeunload", onBeforeUnload);
   }
 
+  // ── Manifest verbs (DAN-578) ───────────────
+
+  function setManifest(scopeId: string, keys: EntityKey[]): void {
+    if (disabled || disposed) return;
+    manifestScopes.add(scopeId);
+    removedPreBoot.delete(scopeId);
+
+    // Reconcile retention for a SHRUNK scope (review A2): keys the scope
+    // no longer references lose this scope's pin now, not at next boot.
+    const held = scopeRetentions.get(scopeId);
+    if (held) {
+      const next = new Set(keys);
+      // Set deletion during iteration is well-defined — no copy needed.
+      for (const key of held) {
+        if (!next.has(key)) releaseKey(scopeId, key);
+      }
+    }
+
+    const row: ManifestRow = { v: 1, keys: [...keys] };
+    dirtySaves.set(manifestKey(scopeId), row);
+    dirtyDeletes.delete(manifestKey(scopeId));
+    markIndexDirty();
+    scheduleFlush();
+  }
+
+  function removeManifest(scopeId: string): void {
+    if (disposed) return;
+    manifestScopes.delete(scopeId);
+    if (!indexSeeded) removedPreBoot.add(scopeId);
+    releaseScope(scopeId);
+    if (disabled) return; // degraded: refcount hygiene only — no writes, no sweep (A3)
+    dirtyDeletes.add(manifestKey(scopeId));
+    dirtySaves.delete(manifestKey(scopeId));
+    markIndexDirty();
+    scheduleGcSweep();
+    scheduleFlush();
+  }
+
+  async function hydrateScope(scopeId: string): Promise<number> {
+    await ready;
+    if (disabled || disposed) return 0;
+
+    const manifest = await readManifestRow(scopeId);
+    // Liveness after EVERY await (reviews B3/B4): a dispose() or
+    // removeManifest() that landed while we were in the engine must win —
+    // hydrating or retaining under a dead scope pins entities forever.
+    if (!manifest || disposed || !manifestScopes.has(scopeId)) return 0;
+
+    // Load only what memory lacks; retain everything the scope references.
+    const missing = manifest.keys.filter((key) => {
+      const separatorIndex = key.indexOf(":");
+      return (
+        separatorIndex !== -1 &&
+        !store.has(key.slice(0, separatorIndex), key.slice(separatorIndex + 1))
+      );
+    });
+    const rows = missing.length > 0 ? await engine.loadMany(missing) : [];
+    if (disposed || !manifestScopes.has(scopeId)) return 0;
+
+    let hydrated = 0;
+    isHydrating = true;
+    try {
+      for (const row of rows) {
+        if (hydrateRow(row)) hydrated++;
+      }
+    } finally {
+      isHydrating = false;
+    }
+    for (const key of manifest.keys) retainUnder(scopeId, key);
+    return hydrated;
+  }
+
+  async function preload(scopeIds?: string[]): Promise<number> {
+    await ready;
+    if (disabled || disposed) return 0;
+
+    // No args = every scope in the live mirror — seeded from the persisted
+    // index at boot in BOTH modes, so it IS the index (review B1).
+    const targets = scopeIds ?? [...manifestScopes];
+    const counts = await Promise.all(targets.map((s) => hydrateScope(s)));
+    return counts.reduce((a, b) => a + b, 0);
+  }
+
   // ── Public handle ──────────────────────────
   function dispose(): void {
     if (disposed) return;
@@ -393,6 +721,13 @@ export function enablePersistence(
       clearTimeout(flushTimer);
       flushTimer = null;
     }
+    if (gcTimer) {
+      clearTimeout(gcTimer);
+      gcTimer = null;
+    }
+    // Refcounts must not outlive the coordinator that took them.
+    // (Deleting the current entry during Map iteration is well-defined.)
+    for (const scopeId of scopeRetentions.keys()) releaseScope(scopeId);
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", onVisibilityChange);
     }
@@ -404,5 +739,5 @@ export function enablePersistence(
     void finalFlush.catch(() => {}).then(() => engine.close());
   }
 
-  return { ready, durable, flush, dispose };
+  return { ready, durable, flush, setManifest, removeManifest, hydrateScope, preload, dispose };
 }
