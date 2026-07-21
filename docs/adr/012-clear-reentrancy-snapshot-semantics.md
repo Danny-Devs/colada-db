@@ -36,18 +36,25 @@ moment `clear()` was called — nothing more:
    version bump. There is no trailing bulk wipe of any kind.
 2. **Writes during the drain are ordinary writes.** They apply, they emit,
    they persist — whether they target a snapshotted id (re-add after its
-   remove), a novel id, or a not-yet-drained snapshotted id (which is then
-   removed when its snapshot turn comes, with the reentrant value as
-   `previousData` — it was present at `clear()` time, so it is cleared,
-   honestly).
-3. **Retention cleanup is keyed to the snapshot.** Each snapshotted id's
-   `refCounts` entry is deleted immediately **before** its remove event is
-   emitted — the snapshotted pin dies with the snapshotted entity, and a
-   `retain()` re-established by a listener during (or after) that delivery
-   creates a fresh entry that survives. Pins on keys with no map entry
-   (manifest-coordinator pins on durable-but-cold rows) are untouched.
-   This is the same delete-entry-then-emit per-item pattern `gc()` already
-   uses.
+   snapshot remove), a novel id, or a not-yet-drained snapshotted id
+   (which is then removed when its snapshot turn comes, with the
+   reentrant value as `previousData` — it was present at `clear()` time,
+   so it is cleared, honestly). Precision (land-review F4): "survives"
+   means survives *the drain it was written after*; a reentrant write to
+   an id whose snapshot remove has NOT yet fired is still removed at
+   that id's snapshot turn — only a write landing after the id's
+   snapshot remove outlives the clear.
+3. **Retention cleanup is keyed to the snapshot and completes BEFORE any
+   emission begins.** ALL snapshotted ids' `refCounts` entries are
+   deleted during snapshot capture, ahead of the first remove event
+   (land-review F1: deleting each entry at its own drain turn destroyed
+   retains established by listeners during EARLIER deliveries —
+   order-dependent behavior for one listener pattern, the exact defect
+   class this ADR condemns). The snapshotted pin dies with the
+   snapshotted entity; ANY `retain()` established by a listener during
+   the drain — same-id or cross-id — creates a fresh entry that
+   survives. Pins on keys with no map entry (manifest-coordinator pins
+   on durable-but-cold rows) are untouched.
 
 Post-`clear()` invariant (the DAN-620 goal): store state, the event
 stream, and refcount bookkeeping agree under any reentrant-write
@@ -84,6 +91,14 @@ identical state.
   concurrent `clear()`. Nested `clear()` from inside a listener is safe
   (inner snapshot removes; outer snapshot's already-removed ids take the
   memory-absent tombstone path, ADR/C1 idempotent-by-emission).
+- Known boundary (land-review F2): a phantom ref minted BEFORE `clear()`
+  (subscribe-before-data `get()`) puts its id IN the snapshot — so a
+  coordinator pin on a durable-but-cold row that also has a phantom
+  subscriber is cleared, and the semantic remove deletes the durable row.
+  The "cold-row pins survive" guarantee holds only for keys with NO map
+  entry at clear time. Whether a phantom counts as "present at clear()
+  time" is an erasure-semantics question routed to DAN-602; this ADR
+  records the current behavior honestly rather than deciding it here.
 - Behavior shift: `clear()` no longer guarantees an empty store on return;
   it guarantees *everything present at call time was removed and evented*.
   With no writing listeners (the overwhelmingly common case) the store is

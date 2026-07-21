@@ -13,8 +13,9 @@
  *   call time) — no trailing bulk wipe of maps or refcounts.
  * - Reentrant writes during the drain are ordinary writes: they apply,
  *   they emit, they survive.
- * - Retention cleanup is keyed deletion per snapshotted id, performed
- *   before that id's remove emission — drain-time retains and pins on
+ * - Retention cleanup is keyed deletion for ALL snapshotted ids,
+ *   completed before ANY remove emission (land-review F1 hoist) —
+ *   drain-time retains (same-id AND cross-id) and pins on
  *   memory-absent (durable-but-cold) keys survive.
  * - The event stream stays replayable through any interleaving
  *   (event-stream honesty: NO state transition without its event).
@@ -129,6 +130,33 @@ describe("clear() reentrancy (ADR-012)", () => {
     // gc() must not collect the pinned, re-added entity.
     expect(store.gc()).toEqual([]);
     expect(store.has("contact", "1")).toBe(true);
+  });
+
+  it("CROSS-ID retain during an earlier id's delivery survives (land-review F1)", () => {
+    // The blocking find: a listener retains a NOT-YET-DRAINED snapshotted
+    // id during an earlier id's remove delivery. With per-turn refcount
+    // deletion, contact:2's turn wiped the fresh pin — order-dependent
+    // behavior for one listener pattern. The hoisted wipe (all snapshot
+    // entries deleted before ANY emission) makes the pin survive.
+    const store = createEntityStore();
+    store.set("contact", "1", { id: "1", name: "Alice" });
+    store.set("contact", "2", { id: "2", name: "Bob" });
+
+    store.subscribe((e) => {
+      if (e.type === "remove" && e.key === "contact:1") {
+        store.retain("contact", "2"); // cross-id pin on a not-yet-drained id
+      }
+    });
+
+    store.clear();
+
+    expect(store.getRefCount("contact", "2")).toBe(1);
+    // The reviewer's full consequence chain: another party re-adds the
+    // entity; the pin established mid-drain must still protect it from gc.
+    store.set("contact", "2", { id: "2", name: "Bob-again" });
+    expect(store.gc()).toEqual([]);
+    expect(store.has("contact", "2")).toBe(true);
+    store.release("contact", "2");
   });
 
   it("pins on memory-absent keys (coordinator cold-row shape) survive clear()", () => {

@@ -546,17 +546,21 @@ export function createEntityStore(): EntityStore {
       for (const [entityType, typeMap] of storage) {
         for (const id of typeMap.keys()) {
           snapshot.push({ entityType, id });
+          // Retention cleanup is keyed to the snapshot and happens HERE,
+          // for ALL snapshotted ids, BEFORE any remove emission begins
+          // (land-review F1): deleting each id's entry at its own drain
+          // turn destroyed retains established by listeners during
+          // EARLIER ids' deliveries — order-dependent behavior for one
+          // listener pattern, the defect class ADR-012 condemns. With
+          // the wipe hoisted, ANY retain() during the drain — same id
+          // or cross-id — creates a fresh entry that survives, as do
+          // pins on memory-absent keys (the persist.ts manifest
+          // coordinator's durable-but-cold rows), which the old
+          // wholesale `refCounts.clear()` destroyed.
+          refCounts.delete(toEntityKey(entityType, id));
         }
       }
       for (const { entityType, id } of snapshot) {
-        // Retention cleanup is keyed to the snapshot, entry-deleted
-        // BEFORE the remove emission (the gc() pattern): the snapshotted
-        // pin dies with the snapshotted entity, while a retain()
-        // re-established by a listener during the drain creates a fresh
-        // entry that survives — as do pins on memory-absent keys (the
-        // persist.ts manifest coordinator's durable-but-cold rows),
-        // which the old wholesale `refCounts.clear()` destroyed.
-        refCounts.delete(toEntityKey(entityType, id));
         removeInternal(entityType, id, "remove");
       }
       getByTypeCache.clear();
