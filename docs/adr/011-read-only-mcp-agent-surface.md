@@ -33,8 +33,14 @@ new re-exports.
    relay, extension port) is explicitly out of scope for this stage.
 2. **Low-level SDK `Server`, not `McpServer`.** The high-level API
    expresses tool inputs as Zod shapes, which would add `zod` as a
-   second runtime dependency; the packet's security gate permits
-   exactly one (`@modelcontextprotocol/sdk`). With the low-level API
+   second DIRECT (authored) runtime dependency — zod is already in the
+   tree transitively via the SDK; the distinction is what WE author
+   against and audit; the packet's security gate permits exactly one
+   authored dependency (`@modelcontextprotocol/sdk`). The SDK marks
+   `Server` deprecated-in-favor-of-`McpServer` but its own JSDoc
+   blesses it for "advanced use cases" with no removal schedule
+   (verified in 1.29.0 types at the 2026-07-20 land review) — the
+   `^1.29.0` pin plus the risk-watch below is the mitigation. With the low-level API
    the tool list is ONE literal array (`buildToolList`) — the
    deny-by-default headline is verifiable by reading it — and argument
    validation is ours, which is where fail-closed refusals with
@@ -101,8 +107,18 @@ new re-exports.
 
 - Positive: the launch-demo claim ("deny-by-default, verifiable by
   reading the tool list") is true in code with tests pointing at it;
-  the allowlist has no known leak path (schema, relations, errors,
-  history all filtered); core remains MCP-free.
+  the allowlist has no known leak path through the schema resource,
+  relation declarations, error messages, refusal paths, or history
+  markers (all filtered; no existence oracle — verified by the
+  2026-07-20 land review's executed attacks); core remains MCP-free.
+- Scope boundary (stated precisely, land-review finding): entity DATA
+  is returned verbatim, so a visible entity's foreign-key FIELD NAMES
+  and id VALUES pointing at hidden types do reach the agent (e.g.
+  `{vault: "s1"}` on a visible contact). The hidden type's name,
+  fields, and rows remain unreachable. If FK-field confidentiality
+  ever enters scope, that is a data-level scrub feature with its own
+  ticket — not a hole in the current claims, which govern the schema
+  and refusal surfaces.
 - Negative: the low-level API means we own argument validation
   forever; the in-band refusal shape (`{error: {code, message}}`) is
   our own convention, to be kept stable for agents.
