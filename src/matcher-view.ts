@@ -80,11 +80,15 @@ export interface MatcherViewDivergence {
 
 export interface MatcherViewOptions {
   /**
-   * Dev-mode two-tier divergence guard: after every event-driven update
-   * on the encodable tier, re-scan the projection, compare membership,
+   * Dev-mode two-tier divergence guard: after event-driven updates on
+   * the encodable tier, re-scan the projection, compare membership,
    * report divergence via {@link MatcherViewOptions.onDivergence}, and
-   * SELF-HEAL to scan truth. Off by default — it costs a full scan per
-   * event, exactly what the encodable tier exists to avoid. Turn it on
+   * SELF-HEAL to scan truth. Runs at the MICROTASK boundary, coalesced
+   * per burst — deferred past the synchronous drain, because mid-drain
+   * the delta tier lawfully lags settled state (queued events carry the
+   * correction) and a synchronous compare would false-alarm on
+   * reentrant-write patterns. Off by default — it costs a scan per
+   * burst, exactly what the encodable tier exists to avoid. Turn it on
    * in tests and staging; an encodable-tier bug must never silently
    * diverge from re-run truth (wrong live results, the worst failure
    * class this subsystem has).
@@ -297,9 +301,12 @@ export function createMatcherView(
 
   /**
    * Dev-mode divergence guard: compare delta-maintained membership to
-   * re-scan truth; report and SELF-HEAL on divergence. Runs after every
-   * relevant event (not just delta-changing ones — in-place entity
-   * mutation outside store events diverges exactly on the noop path).
+   * re-scan truth; report and SELF-HEAL on divergence. Triggered by
+   * every relevant event (not just delta-changing ones — in-place
+   * entity mutation outside store events diverges exactly on the noop
+   * path), but deferred to the microtask boundary: mid-drain the delta
+   * tier lawfully lags settled state while queued events still carry
+   * the correction, so a synchronous compare would false-alarm.
    */
   const checkIntegrity = (): void => {
     const truthIds = scan();
@@ -310,6 +317,17 @@ export function createMatcherView(
     if (missing.length === 0 && extra.length === 0) return;
     (onDivergence ?? defaultDivergenceReport)({ entityType, missing, extra });
     if (adopt(truthIds)) notify();
+  };
+
+  let integrityScheduled = false;
+  const scheduleIntegrityCheck = (): void => {
+    if (integrityScheduled) return;
+    integrityScheduled = true;
+    queueMicrotask(() => {
+      integrityScheduled = false;
+      if (disposed) return;
+      checkIntegrity();
+    });
   };
 
   // ── Opaque tier: coalesced re-scan ─────────
@@ -336,7 +354,7 @@ export function createMatcherView(
     if (disposed || event.entityType !== entityType) return;
     if (tier === "encodable") {
       if (applyDelta(event)) notify();
-      if (verifyIntegrity) checkIntegrity();
+      if (verifyIntegrity) scheduleIntegrityCheck();
     } else {
       scheduleScan();
     }

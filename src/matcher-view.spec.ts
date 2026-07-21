@@ -351,7 +351,7 @@ describe("notifications", () => {
 });
 
 describe("dev-mode divergence guard (verifyIntegrity)", () => {
-  it("detects in-place mutation drift, reports it, and self-heals to scan truth", () => {
+  it("detects in-place mutation drift, reports it, and self-heals to scan truth", async () => {
     const { store, boundary } = harness();
     store.set("contact", "1", inactive("1"));
     const onDivergence = vi.fn();
@@ -366,8 +366,12 @@ describe("dev-mode divergence guard (verifyIntegrity)", () => {
     const held = store.get("contact", "1").value as { status: string };
     held.status = "active";
 
-    // Any same-type event triggers the guard's re-scan compare.
+    // Any same-type event triggers the guard's re-scan compare — which
+    // runs at the microtask boundary (deferred past the drain so
+    // reentrant-write patterns can't false-alarm).
     store.set("contact", "2", inactive("2"));
+    expect(onDivergence).not.toHaveBeenCalled(); // not synchronously
+    await microtasks();
 
     expect(onDivergence).toHaveBeenCalledTimes(1);
     expect(onDivergence).toHaveBeenCalledWith({ entityType: "contact", missing: ["1"], extra: [] });
@@ -375,7 +379,7 @@ describe("dev-mode divergence guard (verifyIntegrity)", () => {
     expect(store.getRefCount("contact", "1")).toBe(1); // healed member is pinned too
   });
 
-  it("stays silent while the delta tier agrees with re-scan truth", () => {
+  it("stays silent while the delta tier agrees with re-scan truth", async () => {
     const { store, boundary } = harness();
     store.set("contact", "1", active("1"));
     const onDivergence = vi.fn();
@@ -385,12 +389,44 @@ describe("dev-mode divergence guard (verifyIntegrity)", () => {
     store.set("contact", "1", inactive("1"));
     store.remove("contact", "2");
     store.set("contact", "3", inactive("3"));
+    await microtasks();
 
     expect(onDivergence).not.toHaveBeenCalled();
   });
 });
 
 describe("drain-queue race (arch review H5 adjacency)", () => {
+  it("integrity guard does not false-alarm when a listener AHEAD of the boundary writes reentrantly", async () => {
+    const store = createEntityStore();
+    // Reactor registered BEFORE the boundary: it runs first per event,
+    // and its reentrant write makes the event the view later processes
+    // STALE versus settled state (the delta tier lawfully lags
+    // mid-drain; the queued event carries the correction). A
+    // synchronous integrity compare would false-alarm here — the guard
+    // defers to the microtask boundary instead (self-review rework 1).
+    store.subscribe((e) => {
+      if (
+        e.entityType === "contact" &&
+        e.type === "set" &&
+        (e.data as { status?: string } | undefined)?.status === "active"
+      ) {
+        store.set("contact", e.id, inactive(e.id));
+      }
+    });
+    const boundary = createStoreBoundary(store);
+    const onDivergence = vi.fn();
+    const view = createMatcherView(boundary, "contact", isActive, {
+      verifyIntegrity: true,
+      onDivergence,
+    });
+
+    store.set("contact", "1", active("1")); // reactor immediately deactivates it
+    await microtasks();
+
+    expect(onDivergence).not.toHaveBeenCalled();
+    expect(view.getMembers()).toEqual([]); // converged to settled truth by drain end
+  });
+
   it("a view created inside a store listener mid-burst converges by the end of the burst", () => {
     const { store, boundary } = harness();
     let view: MatcherView | undefined;

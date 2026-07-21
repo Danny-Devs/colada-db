@@ -83,11 +83,16 @@ ADR-008 §3 freeze ratification (the roadmap 2.2 prerequisite).
 
 An encodable-tier bug must never silently diverge from re-run truth
 (HIGH blast radius: wrong live results). Dev-mode invariant check:
-`createMatcherView(..., { verifyIntegrity: true })` re-scans after
-every event-driven update, compares membership, and on divergence
-reports via `onDivergence` (default `console.error`) **and self-heals**
-to scan truth. Off by default (it costs a scan per event — exactly what
-the encodable tier exists to avoid); on in this repo's tests.
+`createMatcherView(..., { verifyIntegrity: true })` re-scans, compares
+membership, and on divergence reports via `onDivergence` (default
+`console.error`) **and self-heals** to scan truth. The check runs at
+the **microtask boundary**, coalesced per burst — deferred past the
+synchronous drain, because mid-drain the delta tier lawfully lags
+settled state (queued events still carry the correction) and a
+synchronous compare would false-alarm on reentrant-write patterns
+(found in self-review, rework loop 1). Off by default (it costs a scan
+per burst — exactly what the encodable tier exists to avoid); on in
+this repo's tests.
 
 ## Timing semantics
 
