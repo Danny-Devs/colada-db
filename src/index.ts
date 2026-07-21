@@ -53,6 +53,32 @@ export type {
   ExportedRelation,
 } from "./schema";
 
+// ─── Matcher AST (serializable filters, ADR-009 — the live-query substrate) ───
+export {
+  M,
+  parseMatcher,
+  evaluateMatcher,
+  classifyFilter,
+  serializeMatcher,
+  MatcherParseError,
+  MATCHER_MAX_DEPTH,
+  MATCHER_MAX_LIST_LENGTH,
+  MATCHER_MAX_COST,
+} from "./matcher";
+export type {
+  MatcherNode,
+  MatcherScalar,
+  MatcherOrderedScalar,
+  MatcherComparisonNode,
+  MatcherOrderedNode,
+  MatcherListNode,
+  MatcherExistsNode,
+  MatcherGroupNode,
+  MatcherNotNode,
+  MatcherClassification,
+  MatcherParseCode,
+} from "./matcher";
+
 // ─── History (capped field-level change log, ADR-007 §3) ───
 export { enableHistory, createWriteIdGenerator } from "./history";
 export type { HistoryStore, HistoryEntry, HistoryOptions } from "./history";
