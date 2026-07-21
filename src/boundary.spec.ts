@@ -122,6 +122,97 @@ describe("createStoreBoundary", () => {
     expect(b.getVersion()).toBe(0);
   });
 
+  // ── The event-carrying tier (H4, DAN-606) ──────────────────────────
+
+  it("subscribeEvents delivers full payloads for set / remove / evict", () => {
+    const store = createEntityStore();
+    const b = createStoreBoundary(store);
+    const events: Array<{ type: string; id: string; data: unknown; previousData: unknown }> = [];
+    b.subscribeEvents((e) =>
+      events.push({ type: e.type, id: e.id, data: e.data, previousData: e.previousData }),
+    );
+
+    store.set("contact", "1", { id: "1", name: "Alice" });
+    store.set("contact", "1", { id: "1", name: "Alicia" });
+    store.remove("contact", "1");
+    store.set("contact", "2", { id: "2" });
+    store.evict("contact", "2");
+
+    expect(events).toEqual([
+      { type: "set", id: "1", data: { id: "1", name: "Alice" }, previousData: undefined },
+      {
+        type: "set",
+        id: "1",
+        data: { id: "1", name: "Alicia" },
+        previousData: { id: "1", name: "Alice" },
+      },
+      { type: "remove", id: "1", data: undefined, previousData: { id: "1", name: "Alicia" } },
+      { type: "set", id: "2", data: { id: "2" }, previousData: undefined },
+      { type: "evict", id: "2", data: undefined, previousData: { id: "2" } },
+    ]);
+  });
+
+  it("subscribeEvents payload isolation: a mutating listener cannot poison later listeners", () => {
+    // Land-review 2026-07-20 finding 2: each listener gets a per-emission
+    // shallow copy — event-field mutation must not propagate.
+    const store = createEntityStore();
+    const b = createStoreBoundary(store);
+    const seenTypes: string[] = [];
+    b.subscribeEvents((e) => {
+      (e as { type: string }).type = "remove"; // hostile/buggy consumer
+    });
+    b.subscribeEvents((e) => seenTypes.push(e.type));
+
+    store.set("contact", "1", { id: "1" });
+    expect(seenTypes).toEqual(["set"]);
+  });
+
+  it("subscribeEvents passes through origin/transactionId stamped via runWith", () => {
+    const store = createEntityStore();
+    const b = createStoreBoundary(store);
+    const seen: Array<{ origin?: string; transactionId?: string }> = [];
+    b.subscribeEvents((e) => seen.push({ origin: e.origin, transactionId: e.transactionId }));
+
+    store.runWith({ origin: "hydration" }, () => store.set("contact", "1", { id: "1" }));
+    store.runWith({ origin: "local-mutation", transactionId: "tx-9" }, () =>
+      store.set("contact", "2", { id: "2" }),
+    );
+
+    expect(seen).toEqual([
+      { origin: "hydration", transactionId: undefined },
+      { origin: "local-mutation", transactionId: "tx-9" },
+    ]);
+  });
+
+  it("isolates a throwing event listener from event AND void tiers; unsubscribe/dispose stop delivery", () => {
+    const store = createEntityStore();
+    const b = createStoreBoundary(store);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const broken = vi.fn(() => {
+      throw new Error("view bug");
+    });
+    const healthyEvents = vi.fn();
+    const healthyVoid = vi.fn();
+    b.subscribeEvents(broken);
+    const offHealthy = b.subscribeEvents(healthyEvents);
+    b.subscribe(healthyVoid);
+
+    store.set("contact", "1", { id: "1" });
+    expect(broken).toHaveBeenCalledTimes(1);
+    expect(healthyEvents).toHaveBeenCalledTimes(1);
+    expect(healthyVoid).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalled();
+
+    offHealthy();
+    store.set("contact", "2", { id: "2" });
+    expect(healthyEvents).toHaveBeenCalledTimes(1);
+
+    b.dispose();
+    store.set("contact", "3", { id: "3" });
+    expect(broken).toHaveBeenCalledTimes(2); // pre-dispose write above
+    errSpy.mockRestore();
+  });
+
   // The contract test ADR-008 §3 promises: a vanilla consumer using the
   // external-store pattern (subscribe + version-as-snapshot + re-read)
   // stays consistent with the store without ever touching the signal layer.

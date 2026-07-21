@@ -27,6 +27,32 @@ export interface StoreBoundary {
   /** Notify when any entity of a type changes. */
   subscribeType(entityType: string, listener: () => void): () => void;
   /**
+   * The event-carrying tier (arch review H4; added 2026-07-20, BEFORE
+   * any ADR-008 §3 freeze ratification — the roadmap 2.2 prerequisite).
+   *
+   * Unlike the three void tiers above, listeners receive the full
+   * {@link EntityEvent} payload (`type`/`data`/`previousData`/`origin`/
+   * `transactionId`), which is what change-set-driven consumers — live
+   * matcher views, history, cross-tab buses — need: a void callback
+   * would force them to re-diff full snapshots on every tick.
+   *
+   * Delivery order within one store event: event-carrying listeners run
+   * FIRST, then the void tiers — so derived-state maintainers (views)
+   * have already settled by the time snapshot re-readers fire. Same
+   * per-listener error isolation as every other tier, PLUS payload
+   * isolation: each listener receives a per-emission shallow copy, so a
+   * consumer that mutates its event cannot poison later listeners.
+   *
+   * ⚠️ Contract (land-review 2026-07-20): `data`/`previousData` are LIVE
+   * store references, not copies — treat them as read-only; mutating
+   * them rewrites store state WITHOUT an event and desynchronizes every
+   * consumer. Listeners subscribed during a delivery may receive the
+   * in-flight event (Set iteration semantics). Dispose consumers built
+   * on this tier (e.g. matcher views) BEFORE disposing the boundary —
+   * a disposed boundary leaves late subscribers frozen, not torn down.
+   */
+  subscribeEvents(listener: (event: EntityEvent) => void): () => void;
+  /**
    * Monotonic change counter — the snapshot value for
    * `useSyncExternalStore`-style integrations.
    */
@@ -54,6 +80,7 @@ export function createStoreBoundary(store: EntityStore): StoreBoundary {
   const globalListeners = new Set<() => void>();
   const typeListeners = new Map<string, Set<() => void>>();
   const keyListeners = new Map<EntityKey, Set<() => void>>();
+  const eventListeners = new Set<(event: EntityEvent) => void>();
 
   const safeCall = (fn: () => void): void => {
     try {
@@ -66,6 +93,12 @@ export function createStoreBoundary(store: EntityStore): StoreBoundary {
 
   const unsubscribeStore = store.subscribe((event: EntityEvent) => {
     version++;
+    // Event-carrying tier first: derived-state maintainers (live views)
+    // settle before the void tiers' snapshot re-readers run. Each
+    // listener gets a per-emission shallow copy (payload isolation —
+    // one mutating consumer must not poison the rest); `data` itself
+    // stays a live reference per the subscribeEvents contract.
+    for (const fn of eventListeners) safeCall(() => fn({ ...event }));
     for (const fn of globalListeners) safeCall(fn);
     const forType = typeListeners.get(event.entityType);
     if (forType) for (const fn of forType) safeCall(fn);
@@ -86,10 +119,14 @@ export function createStoreBoundary(store: EntityStore): StoreBoundary {
     };
   };
 
-  return {
+  const boundary: StoreBoundary = {
     subscribe(listener) {
       globalListeners.add(listener);
       return () => globalListeners.delete(listener);
+    },
+    subscribeEvents(listener) {
+      eventListeners.add(listener);
+      return () => eventListeners.delete(listener);
     },
     subscribeEntity(entityType, id, listener) {
       return addTo(keyListeners, `${entityType}:${id}` as EntityKey, listener);
@@ -113,6 +150,32 @@ export function createStoreBoundary(store: EntityStore): StoreBoundary {
       globalListeners.clear();
       typeListeners.clear();
       keyListeners.clear();
+      eventListeners.clear();
     },
   };
+  boundaryStores.set(boundary, store);
+  return boundary;
+}
+
+// ─────────────────────────────────────────────
+// Internal store discovery (matcher views)
+// ─────────────────────────────────────────────
+
+/**
+ * boundary → store, so first-party core modules built ON the boundary
+ * (live matcher views) can reach store-level primitives the public
+ * adapter contract deliberately omits (`retain`/`release`/`gc`). The
+ * WeakMap-discovery idiom persist.ts already uses for the optimistic
+ * handle — no new public boundary surface.
+ */
+const boundaryStores = new WeakMap<StoreBoundary, EntityStore>();
+
+/**
+ * Resolve the store behind a boundary created by {@link createStoreBoundary}.
+ * Returns `undefined` for foreign boundary implementations (they were
+ * never registered) — callers must degrade gracefully.
+ * @internal
+ */
+export function resolveBoundaryStore(boundary: StoreBoundary): EntityStore | undefined {
+  return boundaryStores.get(boundary);
 }

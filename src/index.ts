@@ -79,6 +79,17 @@ export type {
   MatcherParseCode,
 } from "./matcher";
 
+// ─── Live matcher views (two-tier reactive membership, DAN-606) ───
+export { createMatcherView, MatcherViewError } from "./matcher-view";
+export type {
+  MatcherView,
+  MatcherViewTier,
+  MatcherViewFilter,
+  MatcherViewOptions,
+  MatcherViewDivergence,
+  MatcherPredicate,
+} from "./matcher-view";
+
 // ─── History (capped field-level change log, ADR-007 §3) ───
 export { enableHistory, createWriteIdGenerator } from "./history";
 export type { HistoryStore, HistoryEntry, HistoryOptions } from "./history";
