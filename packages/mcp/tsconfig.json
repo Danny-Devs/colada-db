@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    // Typecheck against core SOURCE so `pnpm -r typecheck` is green on a
+    // clean tree (dist/ does not exist before `pnpm -r build`). Runtime
+    // resolution still goes through the workspace link to the built dist.
+    "paths": {
+      "colada-db": ["../../src/index.ts"]
+    },
+    "types": ["vitest/globals"]
+  },
+  "include": ["src/**/*"]
+}

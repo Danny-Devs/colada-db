@@ -1,0 +1,39 @@
+{
+  "name": "colada-db-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only in-page MCP agent surface over colada-db — deny-by-default (zero write tools), allowlist-scoped, fail-closed matcher filters",
+  "license": "MIT",
+  "author": {
+    "name": "Danny Devs"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.mjs",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "observe": "node scripts/observe-mcp.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "colada-db": "workspace:*"
+  },
+  "devDependencies": {
+    "tsdown": "^0.21.7",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
