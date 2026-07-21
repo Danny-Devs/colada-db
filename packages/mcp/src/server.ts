@@ -36,6 +36,7 @@ import {
   CallToolRequestSchema,
   ErrorCode,
   ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
   McpError,
   ReadResourceRequestSchema,
@@ -323,8 +324,9 @@ export function createColadaDbMcpServer(options: ColadaDbMcpServerOptions): Serv
   const { boundary, entityDefs, history, defaultIdField, serverInfo } = options;
   const allowed = validateAllowlist(options.allowedTypes);
 
-  // Snapshot at creation, deep-frozen: recomputing per read from a
-  // caller-owned mutable object would be a TOCTOU surface (ADR-011).
+  // Snapshot SERIALIZED at creation (the served text is immutable by
+  // construction): recomputing per read from a caller-owned mutable
+  // object would be a TOCTOU surface (ADR-011).
   const schema = filterSchema(exportSchema(entityDefs, { defaultIdField }), allowed);
   const schemaText = JSON.stringify(schema, null, 2);
 
@@ -352,6 +354,12 @@ export function createColadaDbMcpServer(options: ColadaDbMcpServerOptions): Serv
         mimeType: "application/json",
       },
     ],
+  }));
+
+  // Real clients (MCP Inspector among them) list resource templates by
+  // default; there are none, and saying so beats a method-not-found error.
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, () => ({
+    resourceTemplates: [],
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, (request) => {

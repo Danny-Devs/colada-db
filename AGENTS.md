@@ -17,7 +17,8 @@ The standalone engine extracted from `pinia-colada-plugin-normalizer` (decision:
 
 ## Rules
 
-- **Verify by running:** `CI=true pnpm test` + `pnpm typecheck` + `pnpm build` + `pnpm lint`, all green, before reporting done. Storage-engine changes additionally require observing real OPFS behavior in Chromium.
+- **Verify by running:** `CI=true pnpm -r test` + `pnpm -r typecheck` + `pnpm -r build` + `pnpm -r lint`, all green, before reporting done (workspace-recursive since 2026-07-20: the repo `.npmrc` sets `include-workspace-root=true`, so `-r` covers the core AND `packages/*`). Storage-engine changes additionally require observing real OPFS behavior in Chromium. Agent-surface changes additionally require the observe-run: `pnpm -r build && cd packages/mcp && pnpm observe`.
+- **Workspace shape:** core engine at the root; edge packages under `packages/*` (ADR-008 §2 — core knows nothing about them). First member: `packages/mcp`, the read-only MCP agent surface (ADR-011, `docs/design/mcp-agent-surface.md`). Deny-by-default is structural there — never register a write tool on that surface; agent write affordances arrive only with the guard middleware, as their own deliberate surface.
 - **Reading order:** this file → `docs/adr/` (003–007 are the founding decisions) → `CHANGELOG.md` (last 3 entries).
 - **ADRs are append-only.** 003–007 were adopted from the plugin repo at extraction; new engine decisions continue the numbering here.
 - **No publish, no external pushes, no outreach** without Danny's explicit go. The npm name `colada-db` is reserved; `"private": true` stays until Danny flips it.

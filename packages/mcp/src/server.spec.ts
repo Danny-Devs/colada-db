@@ -139,10 +139,12 @@ describe("topology and deny-by-default", () => {
     expect(tools.map((t) => t.name)).toEqual([QUERY_TOOL_NAME]);
   });
 
-  it("T5: the resource list is exactly the schema resource", async () => {
+  it("T5: the resource list is exactly the schema resource; templates are empty", async () => {
     const { client } = await setup();
     const { resources } = await client.listResources();
     expect(resources.map((r) => r.uri)).toEqual([SCHEMA_RESOURCE_URI]);
+    const { resourceTemplates } = await client.listResourceTemplates();
+    expect(resourceTemplates).toEqual([]);
   });
 
   it("T6: write-shaped tool calls reject as unknown tools and the store is untouched", async () => {

@@ -94,7 +94,8 @@ in one place. The flags still ride along: the schema resource reports
 - **Relation scrubbing**: an allowlisted type's relation that targets a
   non-allowlisted type is dropped from the export (a relation entry
   carries the target type's name — a leak vector).
-- **Snapshot at creation**, deep-frozen. Recomputing per read from a
+- **Snapshot serialized at creation** (the served text is immutable by
+  construction). Recomputing per read from a
   caller-owned mutable object would be a TOCTOU surface and would make
   the resource non-deterministic under app mutation; the registry is
   static in practice. Mutating `entityDefs` after creation does not
