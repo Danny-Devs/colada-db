@@ -39,7 +39,17 @@ export interface StoreBoundary {
    * Delivery order within one store event: event-carrying listeners run
    * FIRST, then the void tiers — so derived-state maintainers (views)
    * have already settled by the time snapshot re-readers fire. Same
-   * per-listener error isolation as every other tier.
+   * per-listener error isolation as every other tier, PLUS payload
+   * isolation: each listener receives a per-emission shallow copy, so a
+   * consumer that mutates its event cannot poison later listeners.
+   *
+   * ⚠️ Contract (land-review 2026-07-20): `data`/`previousData` are LIVE
+   * store references, not copies — treat them as read-only; mutating
+   * them rewrites store state WITHOUT an event and desynchronizes every
+   * consumer. Listeners subscribed during a delivery may receive the
+   * in-flight event (Set iteration semantics). Dispose consumers built
+   * on this tier (e.g. matcher views) BEFORE disposing the boundary —
+   * a disposed boundary leaves late subscribers frozen, not torn down.
    */
   subscribeEvents(listener: (event: EntityEvent) => void): () => void;
   /**
@@ -84,8 +94,11 @@ export function createStoreBoundary(store: EntityStore): StoreBoundary {
   const unsubscribeStore = store.subscribe((event: EntityEvent) => {
     version++;
     // Event-carrying tier first: derived-state maintainers (live views)
-    // settle before the void tiers' snapshot re-readers run.
-    for (const fn of eventListeners) safeCall(() => fn(event));
+    // settle before the void tiers' snapshot re-readers run. Each
+    // listener gets a per-emission shallow copy (payload isolation —
+    // one mutating consumer must not poison the rest); `data` itself
+    // stays a live reference per the subscribeEvents contract.
+    for (const fn of eventListeners) safeCall(() => fn({ ...event }));
     for (const fn of globalListeners) safeCall(fn);
     const forType = typeListeners.get(event.entityType);
     if (forType) for (const fn of forType) safeCall(fn);

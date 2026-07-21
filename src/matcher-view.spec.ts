@@ -103,6 +103,22 @@ describe("encodable tier — membership from event payloads (ZERO re-scans)", ()
     expect(scans).toHaveBeenCalledTimes(1); // STILL only the seed
   });
 
+  it("minted member arrays are frozen — untyped consumers cannot corrupt the snapshot", () => {
+    // Land-review 2026-07-20 finding 4: readonly string[] guards TS only.
+    const { store, boundary } = harness();
+    store.set("contact", "1", active("1"));
+    const view = createMatcherView(boundary, "contact", isActive);
+    expect(Object.isFrozen(view.getMembers())).toBe(true); // seed mint
+    store.set("contact", "2", active("2"));
+    expect(Object.isFrozen(view.getMembers())).toBe(true); // delta add mint
+    store.set("contact", "1", inactive("1"));
+    expect(Object.isFrozen(view.getMembers())).toBe(true); // delta remove mint
+    expect(() => {
+      (view.getMembers() as string[]).push("evil");
+    }).toThrow(TypeError);
+    expect(view.getMembers()).toEqual(["2"]);
+  });
+
   it("drops membership on remove AND on evict (honest projection scope) — still zero re-scans", () => {
     const { store, boundary, scans } = harness();
     store.set("contact", "1", active("1"));

@@ -271,7 +271,9 @@ export function createMatcherView(
     for (const id of membership) if (!next.has(id)) release(id);
     membership.clear();
     for (const id of next) membership.add(id);
-    members = nextIds;
+    // Frozen at every mint site: `readonly string[]` guards TS callers
+    // only; untyped (agent-surface) consumers get the same immutability.
+    members = Object.freeze(nextIds);
     return true;
   };
 
@@ -290,11 +292,11 @@ export function createMatcherView(
     if (now) {
       membership.add(id);
       retain(id);
-      members = [...members, id];
+      members = Object.freeze([...members, id]);
     } else {
       membership.delete(id);
       release(id);
-      members = members.filter((m) => m !== id);
+      members = Object.freeze(members.filter((m) => m !== id));
     }
     return true;
   };
@@ -347,7 +349,7 @@ export function createMatcherView(
     membership.add(id);
     retain(id);
   }
-  if (seedIds.length > 0) members = seedIds;
+  if (seedIds.length > 0) members = Object.freeze(seedIds);
 
   // ── Event wiring ───────────────────────────
   const unsubscribe = boundary.subscribeEvents((event) => {

@@ -152,6 +152,21 @@ describe("createStoreBoundary", () => {
     ]);
   });
 
+  it("subscribeEvents payload isolation: a mutating listener cannot poison later listeners", () => {
+    // Land-review 2026-07-20 finding 2: each listener gets a per-emission
+    // shallow copy — event-field mutation must not propagate.
+    const store = createEntityStore();
+    const b = createStoreBoundary(store);
+    const seenTypes: string[] = [];
+    b.subscribeEvents((e) => {
+      (e as { type: string }).type = "remove"; // hostile/buggy consumer
+    });
+    b.subscribeEvents((e) => seenTypes.push(e.type));
+
+    store.set("contact", "1", { id: "1" });
+    expect(seenTypes).toEqual(["set"]);
+  });
+
   it("subscribeEvents passes through origin/transactionId stamped via runWith", () => {
     const store = createEntityStore();
     const b = createStoreBoundary(store);
