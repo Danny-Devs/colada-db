@@ -89,7 +89,12 @@ acknowledgment is still outstanding.** Concretely:
    end state byte-identical pre/post this ADR). Both are the "foreign
    interference with a tx-touched key" class — tracked in the tx-vs-
    foreign-writes follow-up ticket, deliberately NOT solved by widening
-   this overlay.
+   this overlay. **[RESOLVED by ADR-016 (DAN-635):** the evicted-put hole is
+   closed — the mask now covers PUTs too (`buffer.has(key)`), so a stale
+   engine row can no longer page over an evicted optimistic put (flavor A).
+   The mask stays mask-first ON PURPOSE — yielding to the confirmed write
+   would diverge at commit; the residual foreign-confirmed-write hazard is
+   the rollback clobber, bounded to the sync-rebase seam (ADR-006 §6).]**
 
 ## Alternatives Considered
 

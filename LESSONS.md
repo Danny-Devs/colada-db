@@ -97,6 +97,43 @@ everything that races the await, and the failure is silent by
 construction. If a phase flag and a provenance stamp both exist for the
 same concept, the flag is the redundant, drift-prone one: delete it.
 
+## [2026-07-21] — a residency-dependent guard is not a mask: eviction is exactly the case it can't cover
+
+**Mistake:** ADR-015 gave optimistic DELETEs a hydration mask but gave
+optimistic PUTs none, on the premise "while the optimistic value stays
+resident, fresh-wins (`store.has`) blocks hydration." Eviction removes the
+resident value — so after `tx.set(c1,"kept")` → `evict(c1)` mid-tx, a
+`hydrateScope` paged the stale pre-tx engine row `v1` over the optimistic
+projection. Worst of all it SURVIVED settlement: commit graduated "kept" to
+disk while memory kept `v1` (DAN-635 flavor A; verified pre-existing at
+`71fdf82`).
+
+**Why it happened:** the argument "fresh-wins already blocks the put" quietly
+narrowed "the optimistic projection is protected" to "the optimistic VALUE is
+in memory." Those differ exactly when the key is evicted — a memory-only
+event that is a first-class part of this store (ADR-004). A guard that
+depends on a value being RESIDENT cannot protect the key's projection across
+an eviction; only a mask keyed to the tx BUFFER (which outlives residency)
+can. ADR-015 itself flagged the hole and filed it — the lesson is that a
+"fresh-wins covers this" hand-wave is a residency assumption in disguise, and
+residency is the one thing eviction breaks.
+
+**Fix:** ADR-016 (the mask covers any buffered op — `buffer.get(key)?.op ===
+"delete"` becomes `buffer.has(key)`, so a PUT vetoes hydration of its evicted
+key just as a DELETE vetoes un-deletion) + `src/tx-foreign-interference.spec.ts`
+(5 regression tests, 2 verified failing pre-fix — the strongest available
+encoding) + this entry. The mask stays mask-first ON PURPOSE: yielding to a
+foreign confirmed write would diverge at commit (encoded as the flavor-B
+commit-leg pin), and the residual foreign-write hazard is bounded to the
+sync-rebase seam (ADR-006 §6).
+
+**For future agents:** when you protect an optimistic projection, key the
+protection to the transaction BUFFER, not to the value's presence in memory —
+a residency check (`store.has`, fresh-wins) silently stops covering the
+projection the moment the key is evicted, and eviction is a first-class
+memory event here. "Fresh-wins already handles it" is a residency assumption;
+name it and test the evicted case before you rely on it.
+
 ## [2026-07-21] — a drain before an await hides truth from every observer for the flight
 
 **Mistake:** `flush()` drained the dirty sets into local arrays before
