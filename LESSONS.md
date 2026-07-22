@@ -64,3 +64,35 @@ cancel, reorder, or suppress queued confirmed writes — the durability
 pipeline must stay monotone in confirmed store truth; if an optimization
 drops a queued write, prove the fallback state is a surviving lineage
 first, and encode that proof as a test.
+
+## [2026-07-21] — an exclusion window keyed to a phase flag is a span bug waiting to happen
+
+**Mistake:** the persistence subscriber excluded hydration-origin writes via
+a coordinator phase flag (`isHydrating`), and boot held that flag across
+every `engine.loadAll()`/`loadMany()` await. The exclusion of ONE write
+channel (hydration) thereby became the exclusion of ALL writes for the
+duration of engine I/O — an app `set`/`remove` racing boot was applied to
+memory, evented, and silently dropped from the durability pipeline
+(DAN-630; flagged by DAN-621's self-review, executed here).
+
+**Why it happened:** the flag conflated two different claims — "this write
+IS hydration" (a property of the write) with "hydration is HAPPENING" (a
+property of time). The temporal claim is only correct while every edit
+preserves the exact span; boot's span had quietly widened to cover awaits.
+The tell was in the codebase twice over: `hydrateScope` scoped the same
+flag tightly around only its synchronous loop, and `hydrateRow` already
+stamped every hydration write `origin: "hydration"` through the privileged
+`runWith` channel — the exact per-event fact the flag was approximating.
+
+**Fix:** ADR-014 (hydration exclusion by provenance: the subscriber skips
+exactly `origin === "hydration"` events; the flag is deleted; debounce/gc
+timers defer during boot so the ADR-013 overlay stays authoritative) +
+`src/boot-hydration-writes.spec.ts` (8 regression tests, 6 verified
+failing pre-fix — the strongest available encoding) + this entry.
+
+**For future agents:** when excluding a write CHANNEL from a pipeline, key
+the exclusion to per-event provenance (origin stamps), never to a
+coordinator phase flag — any flag held across an `await` excludes
+everything that races the await, and the failure is silent by
+construction. If a phase flag and a provenance stamp both exist for the
+same concept, the flag is the redundant, drift-prone one: delete it.

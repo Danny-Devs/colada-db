@@ -225,7 +225,14 @@ export function enablePersistence(
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let opened = false;
   let disabled = false;
-  let isHydrating = false;
+  // True from construction until boot hydration settles (or boot fails).
+  // NOT an event filter — hydration-origin exclusion is provenance-based
+  // (ADR-014); this flag only defers the debounce/gc TIMERS so the dirty
+  // sets stay resident (and the ADR-013 pending-truth overlay stays
+  // authoritative) for every row boot will hydrate. Flushing mid-boot
+  // would drain a pending delete while an engine load snapshot predating
+  // it is in flight — the stale row would then hydrate unopposed.
+  let booting = true;
   let disposed = false;
   let flushing = false;
 
@@ -264,11 +271,15 @@ export function enablePersistence(
   const durable = requestDurable ? requestDurableStorage() : Promise.resolve(false);
 
   // ── Subscribe to store changes ─────────────
-  // IMPORTANT: store.subscribe fires synchronously within store.set().
-  // The isHydrating guard relies on this — if subscribe were async/batched,
-  // hydration would trigger a write-storm (re-persisting loaded entities).
+  // Hydration exclusion is PROVENANCE-based (ADR-014): hydrateRow stamps
+  // its writes `origin: "hydration"` via the privileged runWith channel
+  // (unforgeable through the ordinary write API — origin.spec.ts), and the
+  // subscriber skips exactly those. No phase flag: a flag spanning boot's
+  // engine awaits was the DAN-630 bug — every app write landing during
+  // those awaits was silently dropped from the durability pipeline.
   const unsub = store.subscribe((event) => {
-    if (isHydrating || disabled || disposed) return;
+    if (disabled || disposed) return;
+    if (event.origin === "hydration") return; // never re-persist what was just loaded
 
     const key = event.key;
 
@@ -349,6 +360,13 @@ export function enablePersistence(
     if (flushTimer || disabled || disposed) return;
     flushTimer = setTimeout(() => {
       flushTimer = null;
+      // Boot hydration still in flight — re-arm instead of flushing
+      // (ADR-014 rule 2): draining the dirty sets now would blind the
+      // pending-truth overlay against load snapshots still in the engine.
+      if (booting) {
+        scheduleFlush();
+        return;
+      }
       flush();
     }, writeDebounce);
   }
@@ -415,8 +433,8 @@ export function enablePersistence(
    * existence-based until engines populate row versions (ADR-005).
    * Stamped `hydration` (ADR-007 §1): this coordinator OWNS the privileged
    * origin — undo stacks skip these, sync must not echo them, history
-   * attributes them. (Persistence's own subscriber ignores them via
-   * isHydrating regardless.) Returns true if a write happened.
+   * attributes them, and persistence's own subscriber excludes them BY
+   * THIS STAMP (ADR-014). Returns true if a write happened.
    */
   function hydrateRow(row: { key: EntityKey; data: unknown }): boolean {
     const key = row.key;
@@ -493,6 +511,12 @@ export function enablePersistence(
     if (gcTimer || disposed || disabled) return;
     gcTimer = setTimeout(() => {
       gcTimer = null;
+      if (booting) {
+        // Same deferral as scheduleFlush: the sweep's flush-first step must
+        // not drain the dirty sets while boot loads are in flight.
+        scheduleGcSweep();
+        return;
+      }
       void flush()
         .catch(() => {})
         .then(() => {
@@ -545,7 +569,11 @@ export function enablePersistence(
       }
       opened = true;
 
-      isHydrating = true;
+      // No phase flag around this block (ADR-014): app writes landing
+      // during the loads below enter the dirty sets like any other write,
+      // and hydrateRow's pending-truth overlay + fresh-wins reconcile them
+      // against the (possibly stale) rows these loads return. `booting`
+      // only holds the debounce/gc timers off until the finally.
       try {
         // Post-await `disposed` re-checks throughout (review B3): a
         // dispose() racing boot must not hydrate or retain afterward —
@@ -600,11 +628,12 @@ export function enablePersistence(
           if (!indexSeeded) seedIndex([]); // no index row on disk yet
         }
       } finally {
-        isHydrating = false;
+        booting = false;
       }
 
-      // Writes that happened while the engine was still opening consumed
-      // their debounce timer against an unopened engine and early-returned.
+      // Writes that happened while the engine was opening or hydrating
+      // either consumed their debounce timer against an unopened engine
+      // (early-returned in flush) or were deferred by the `booting` re-arm.
       // Re-schedule so they aren't stranded until the next store event.
       if (dirtySaves.size > 0 || dirtyDeletes.size > 0) {
         scheduleFlush();
@@ -613,6 +642,7 @@ export function enablePersistence(
       onReady?.();
     })
     .catch((err) => {
+      booting = false;
       disabled = true;
       onError?.(err);
       if (process.env.NODE_ENV !== "production") {
@@ -697,13 +727,8 @@ export function enablePersistence(
     if (disposed || !manifestScopes.has(scopeId)) return 0;
 
     let hydrated = 0;
-    isHydrating = true;
-    try {
-      for (const row of rows) {
-        if (hydrateRow(row)) hydrated++;
-      }
-    } finally {
-      isHydrating = false;
+    for (const row of rows) {
+      if (hydrateRow(row)) hydrated++;
     }
     for (const key of manifest.keys) retainUnder(scopeId, key);
     return hydrated;
