@@ -79,8 +79,17 @@ acknowledgment is still outstanding.** Concretely:
    must not un-delete it mid-transaction. On commit the delete graduates
    to the dirty sets (normal path); on rollback the buffer dies and the
    mask lifts — the untouched durable row pages back in on the next
-   hydrate. Optimistic PUTs need no mask: the optimistic value is IN
-   memory, so fresh-wins (`store.has`) already blocks hydration.
+   hydrate. Optimistic PUTs get no mask: while the optimistic value stays
+   resident, fresh-wins (`store.has`) blocks hydration — but that premise
+   fails if the key is EVICTED mid-transaction (a stale engine row can
+   page over the optimistic projection; gauntlet F2, pre-existing at
+   base). Boundary, not a rule: the mask is also checked before the dirty
+   sets, so an older uncommitted tx.remove vetoes hydration of a newer
+   confirmed non-tx write to the same key until settlement (gauntlet F1,
+   end state byte-identical pre/post this ADR). Both are the "foreign
+   interference with a tx-touched key" class — tracked in the tx-vs-
+   foreign-writes follow-up ticket, deliberately NOT solved by widening
+   this overlay.
 
 ## Alternatives Considered
 
