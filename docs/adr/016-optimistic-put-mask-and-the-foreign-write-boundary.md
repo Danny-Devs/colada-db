@@ -62,8 +62,10 @@ absent (ADR-004: an evicted key is durable-but-cold and re-hydrates later);
 on commit the tx op graduates to disk and any subsequent hydrate pages in
 the committed value, so **memory converges to the same truth disk converges
 to, by settlement.** The rollback leg is coherent too: the put never
-graduated, the engine row was never touched, and the mask lifting pages the
-untouched server truth back in.
+graduated, the engine row was never touched, and rollback's `recompute()`
+restores the serverTruth snapshot into memory synchronously at settlement
+(gauntlet F2 precision: memory holds the pre-tx value immediately, before
+any hydrate — the lifted mask then lets later hydrates agree).
 
 **Flavor B is bounded, not fixed, and deliberately so.** The mask must stay
 mask-first — see the rejection of "mask yields to the confirmed write"
@@ -71,14 +73,22 @@ below. What remains is the **rollback clobber**: the tx's serverTruth
 snapshot goes stale the moment a foreign confirmed write lands on a
 tx-touched key, and rollback restores the stale snapshot over that write.
 That is a `serverTruth`-staleness hazard in the transaction layer, not a
-`hydrateRow` precedence question, and it is the exact class the sync
-coordinator's server-authoritative rebase owns (ADR-006 §6: the client
-rebases in-flight optimistic transactions on post-apply confirmed state via
-the transaction system's clear-and-replay). Solving it locally would mean
-teaching the tx layer to observe foreign confirmed writes and
-refresh/invalidate its snapshots — widening the tx conflict model ahead of
-the sync coordinator that will own it, and touching the very serverTruth
-machinery ADR-006 §1 freezes as the sync outbox. The mask keeps flavor B's
+`hydrateRow` precedence question, and it belongs with the sync
+coordinator's server-authoritative rebase (ADR-006 §6: the client rebases
+in-flight optimistic transactions on post-apply confirmed state via the
+transaction system's clear-and-replay). Scope honesty (gauntlet F1): §6 as
+written fires on PULLED server state — a purely-local foreign `set` racing
+a tx would not traverse pull/apply, so the Stage-3 rebase work must be
+scoped to also hook local confirmed writes onto tx-touched keys (or
+declare them unsupported mid-tx). A cheaper local fix was probed and is
+UNSOUND: refreshing `serverTruth` from the store event corrupts it,
+because `store.set` shallow-merges onto the optimistic in-memory value —
+the event's post-merge data can carry optimistic fields into the rollback
+source of truth. Solving it locally would mean teaching the tx layer to
+observe foreign confirmed writes and refresh/invalidate its snapshots
+from pre-merge data — widening the tx conflict model ahead of the sync
+coordinator that will own it, and touching the very serverTruth machinery
+ADR-006 §1 freezes as the sync outbox. The mask keeps flavor B's
 **commit** leg coherent today (memory absent matches the committed delete);
 the rollback window is byte-identical pre/post this ADR, now NAMED and
 pinned (`tx-foreign-interference.spec.ts`, flavor-B rollback leg) instead of
