@@ -179,10 +179,11 @@ export async function requestDurableStorage(): Promise<boolean> {
  * `transactionId` are buffered per-transaction; commit graduates the
  * buffer's net effect into the normal write path, rollback discards it.
  * Uncommitted buffers die at `dispose()`/unload by design — they were
- * never confirmed. An uncommitted optimistic DELETE additionally masks
- * hydration of its key (ADR-015): a boot or remount load can never
- * un-delete an optimistic projection mid-transaction. See
- * `docs/design/optimistic-durability.md`.
+ * never confirmed. An uncommitted optimistic op (PUT or DELETE) additionally
+ * masks hydration of its key (ADR-015 delete mask, generalized to PUTs by
+ * ADR-016): a boot or remount load can never un-delete an optimistic remove
+ * nor page a stale engine row over an EVICTED optimistic put mid-transaction.
+ * See `docs/design/optimistic-durability.md`.
  *
  * @example
  * ```typescript
@@ -489,15 +490,24 @@ export function enablePersistence(
     const key = row.key;
     const separatorIndex = key.indexOf(":");
     if (separatorIndex === -1) return false;
-    // Optimistic-delete mask (ADR-015 rule 4): memory's absence of an
-    // optimistically-removed key is a deliberate projection — hydrating
-    // over it would un-delete mid-transaction (and after commit leave
-    // memory keeping a row disk deletes). Unconfirmed state still never
-    // flushes and never hydrates; it may only VETO hydration of its key.
-    // Optimistic PUTs need no mask — their value is in memory, so the
-    // fresh-wins check below already blocks the row.
+    // Optimistic mask (ADR-016, generalizing ADR-015 rule 4 from delete-only
+    // to ANY buffered op): memory's projection of an optimistically-touched
+    // key is deliberate — hydration must not page in a value that
+    // contradicts the tx's pending authoritative op. A buffered DELETE
+    // vetoes so a load can't un-delete the projection mid-transaction
+    // (ADR-015 flavor 5); a buffered PUT vetoes so a stale engine row can't
+    // page over an EVICTED optimistic put (DAN-635 flavor A — fresh-wins
+    // below protects the put only while it stays resident, and eviction
+    // removes it). Unconfirmed state still never flushes and never hydrates;
+    // it may only VETO hydration of its key, and only until settlement.
+    // Mask-first is deliberate: a foreign confirmed write to a tx-touched
+    // key must NOT override the mask — doing so diverges at commit (the tx
+    // op graduates to disk while memory keeps the foreign value). The
+    // residual foreign-confirmed-write hazard (a stale serverTruth snapshot
+    // clobbered on rollback) is bounded to the sync-rebase seam (ADR-006 §6),
+    // NOT this precedence — see ADR-016.
     for (const buffer of pendingTx.values()) {
-      if (buffer.get(key)?.op === "delete") return false;
+      if (buffer.has(key)) return false;
     }
     // Pending-truth overlay (ADR-013 rule 2, extended over the in-flight
     // window by ADR-015): confirmed-but-not-yet-quiesced state outranks
