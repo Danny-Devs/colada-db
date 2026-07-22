@@ -530,18 +530,39 @@ export function createEntityStore(): EntityStore {
     },
 
     clear() {
+      // clear() removes EXACTLY its snapshot (ADR-012, DAN-620): every
+      // (type, id) entry present at this moment — atomically captured
+      // across all types — is removed via the ordinary per-entity path,
+      // emitting a semantic remove each (ADR-004) so every subscriber
+      // stays coherent: persistence clears durable rows, indexes and
+      // denorm caches invalidate, live refs fire their watchers.
+      //
+      // There is deliberately NO trailing bulk wipe: listeners may write
+      // during the drain (the H5 contract), and a reentrant write is an
+      // ordinary write — applied, evented, SURVIVING. The old
+      // `typeMap.clear()` erased such writes with no event, silently
+      // diverging every event consumer from store truth.
+      const snapshot: Array<{ entityType: string; id: string }> = [];
       for (const [entityType, typeMap] of storage) {
-        // Emit a semantic remove per entity so every subscriber stays
-        // coherent: persistence clears durable rows, indexes and denorm
-        // caches invalidate, and live refs (set to undefined first) fire
-        // their watchers. Silent clearing left them all rendering ghosts.
-        const ids = Array.from(typeMap.keys());
-        for (const id of ids) {
-          removeInternal(entityType, id, "remove");
+        for (const id of typeMap.keys()) {
+          snapshot.push({ entityType, id });
+          // Retention cleanup is keyed to the snapshot and happens HERE,
+          // for ALL snapshotted ids, BEFORE any remove emission begins
+          // (land-review F1): deleting each id's entry at its own drain
+          // turn destroyed retains established by listeners during
+          // EARLIER ids' deliveries — order-dependent behavior for one
+          // listener pattern, the defect class ADR-012 condemns. With
+          // the wipe hoisted, ANY retain() during the drain — same id
+          // or cross-id — creates a fresh entry that survives, as do
+          // pins on memory-absent keys (the persist.ts manifest
+          // coordinator's durable-but-cold rows), which the old
+          // wholesale `refCounts.clear()` destroyed.
+          refCounts.delete(toEntityKey(entityType, id));
         }
-        typeMap.clear();
       }
-      refCounts.clear();
+      for (const { entityType, id } of snapshot) {
+        removeInternal(entityType, id, "remove");
+      }
       getByTypeCache.clear();
     },
 
