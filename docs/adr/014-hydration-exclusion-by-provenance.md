@@ -65,8 +65,9 @@ their current mid-boot semantics — see Consequences.
 - **Origin filter WITHOUT the flush deferral:** leaves the timer free to drain
   a mid-boot `remove` from the dirty sets while a load snapshot predating the
   delete is in flight — stale-row resurrection through the overlay's blind
-  spot. The deferral closes the automatic path; only explicit flushes can
-  still enter the in-flight window.
+  spot. The deferral closes the timer path; direct `flush()` calls (app code
+  or the lifecycle listeners) can still enter the in-flight window — see the
+  boundary bullet under Consequences.
 
 ## Consequences
 
@@ -75,13 +76,17 @@ their current mid-boot semantics — see Consequences.
   writes and nothing else, at every instant.
 - Positive: less state — `isHydrating` and both of its try/finally spans are
   gone; `hydrateScope` needs no flag choreography either.
-- Boundary (pre-existing class, ADR-013's in-flight bullet, narrowed here): an
-  EXPLICIT `flush()` during boot still drains the dirty sets while a load may
+- Boundary (pre-existing class, ADR-013's in-flight bullet, narrowed here): a
+  DIRECT `flush()` during boot still drains the dirty sets while a load may
   be in flight; engine-level read/write ordering then decides whether a stale
-  snapshot row hydrates. The deferral removes the automatic (debounce-timer)
-  entry into that window; the explicit path remains available because
-  `dispose()` racing boot must still be able to flush acknowledged pre-boot
-  writes (C2). Tracked with the in-flight-overlay follow-up.
+  snapshot row hydrates. The deferral removes the debounce/gc-timer entry
+  into that window, but "direct" is broader than app code: the module's own
+  `visibilitychange`/`beforeunload` lifecycle listeners call `flush()` and are
+  automatic entries (a tab hidden during boot walks straight in — gauntlet F1,
+  executed). The path stays open because `dispose()` racing boot and unload
+  MUST flush acknowledged dirt or it dies with the tab (C2). Tracked with the
+  in-flight-overlay follow-up (which also owns the uncommitted-optimistic-
+  remove-racing-boot flavor, gauntlet F2).
 - Semantics note: a listener that reacts to a hydration event by writing
   *synchronously inside the delivery* inherits the `hydration` origin
   (`runWith` is still on the stack) and is therefore not persisted — identical
