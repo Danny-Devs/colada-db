@@ -179,7 +179,10 @@ export async function requestDurableStorage(): Promise<boolean> {
  * `transactionId` are buffered per-transaction; commit graduates the
  * buffer's net effect into the normal write path, rollback discards it.
  * Uncommitted buffers die at `dispose()`/unload by design — they were
- * never confirmed. See `docs/design/optimistic-durability.md`.
+ * never confirmed. An uncommitted optimistic DELETE additionally masks
+ * hydration of its key (ADR-015): a boot or remount load can never
+ * un-delete an optimistic projection mid-transaction. See
+ * `docs/design/optimistic-durability.md`.
  *
  * @example
  * ```typescript
@@ -227,14 +230,45 @@ export function enablePersistence(
   let disabled = false;
   // True from construction until boot hydration settles (or boot fails).
   // NOT an event filter — hydration-origin exclusion is provenance-based
-  // (ADR-014); this flag only defers the debounce/gc TIMERS so the dirty
-  // sets stay resident (and the ADR-013 pending-truth overlay stays
-  // authoritative) for every row boot will hydrate. Flushing mid-boot
-  // would drain a pending delete while an engine load snapshot predating
-  // it is in flight — the stale row would then hydrate unopposed.
+  // (ADR-014); this flag (a) defers the debounce/gc TIMERS so mid-boot
+  // dirt rides one post-boot flush instead of churning batches against
+  // in-flight loads, and (b) holds the ADR-015 in-flight overlay open
+  // (maybeClearInflight) so a DIRECT mid-boot flush() — lifecycle
+  // listeners, dispose, app code — leaves its drained-and-even-acked
+  // batch visible to hydrateRow until boot's load snapshots are fully
+  // consumed. Before ADR-015, that direct-flush path drained a pending
+  // delete out from under the overlay and the stale snapshot row
+  // hydrated unopposed (DAN-630 gauntlet F1).
   let booting = true;
   let disposed = false;
   let flushing = false;
+  // In-flight overlay (ADR-015): flush() DRAINS the dirty sets before its
+  // writeBatch await — draining must be a MOVE, not a clear, or confirmed
+  // truth goes invisible to the pending-truth overlay for the batch's
+  // whole flight. These hold the drained slice; hydrateRow/readManifestRow
+  // consult them AFTER the dirty sets (dirty is strictly newer per key).
+  // Cleared only at quiescence — see maybeClearInflight.
+  const inflightPuts = new Map<EntityKey, unknown>();
+  const inflightDeletes = new Set<EntityKey>();
+  // Open hydrateScope/readManifestRow brackets (boot is tracked by
+  // `booting` itself). While any is open, a load snapshot predating the
+  // last batch ack may still be unconsumed — the overlay must stay valid.
+  let activeHydrations = 0;
+
+  /**
+   * Clear the in-flight overlay iff quiescent (ADR-015 rule 2): no batch
+   * in flight, boot settled, no hydration bracket open. Until then a
+   * retained entry is either newer than what a straddling read returns
+   * (prefer it) or byte-identical to the durable row it produced (prefer
+   * is a no-op). Never cleared once disabled: the engine failed mid-batch,
+   * so the frozen overlay is the only honest record of truth the engine
+   * lost — later hydrations must not resurrect what it corrects.
+   */
+  function maybeClearInflight(): void {
+    if (disabled || flushing || booting || activeHydrations > 0) return;
+    inflightPuts.clear();
+    inflightDeletes.clear();
+  }
 
   // ── Scope retention bookkeeping (DAN-578) ──
   // Keys this coordinator has retained, per scope. A key referenced by N
@@ -361,8 +395,9 @@ export function enablePersistence(
     flushTimer = setTimeout(() => {
       flushTimer = null;
       // Boot hydration still in flight — re-arm instead of flushing
-      // (ADR-014 rule 2): draining the dirty sets now would blind the
-      // pending-truth overlay against load snapshots still in the engine.
+      // (ADR-014 rule 2). Since ADR-015 the overlay survives a drain, so
+      // this is batch-churn economy plus first-line defense: mid-boot
+      // dirt stays in ONE place and rides one post-boot flush.
       if (booting) {
         scheduleFlush();
         return;
@@ -401,6 +436,17 @@ export function enablePersistence(
     flushing = true;
     const puts = Array.from(dirtySaves.entries()).map(([key, value]) => ({ key, value }));
     const deletes = Array.from(dirtyDeletes);
+    // Drain = MOVE into the in-flight overlay (ADR-015 rule 1), latest op
+    // per key winning across consecutive batches (a key is in at most one
+    // dirty set, so put/delete displacement here is total).
+    for (const { key, value } of puts) {
+      inflightPuts.set(key, value);
+      inflightDeletes.delete(key);
+    }
+    for (const key of deletes) {
+      inflightDeletes.add(key);
+      inflightPuts.delete(key);
+    }
     dirtySaves.clear();
     dirtyDeletes.clear();
 
@@ -418,6 +464,9 @@ export function enablePersistence(
       flushing = false;
       settle();
       inflightFlush = null;
+      // Batch acked (or failed→disabled): clear the in-flight overlay only
+      // if nothing that might hold a pre-ack snapshot is still running.
+      maybeClearInflight();
       // If new writes arrived during the flush, schedule another
       if (dirtySaves.size > 0 || dirtyDeletes.size > 0) {
         scheduleFlush();
@@ -440,16 +489,29 @@ export function enablePersistence(
     const key = row.key;
     const separatorIndex = key.indexOf(":");
     if (separatorIndex === -1) return false;
-    // Pending-truth overlay (ADR-013 rule 2 — the readManifestRow/B4
-    // principle generalized to entity rows): confirmed-but-unflushed state
-    // outranks the engine's flushed rows. A pending delete means this row
-    // is doomed — hydrating it would resurrect a semantically-deleted
-    // entity into memory; a pending save means the engine row is stale —
-    // hydrate the pending value instead. Uncommitted transaction buffers
-    // (pendingTx) are deliberately NOT consulted: unconfirmed state must
-    // neither flush nor hydrate.
+    // Optimistic-delete mask (ADR-015 rule 4): memory's absence of an
+    // optimistically-removed key is a deliberate projection — hydrating
+    // over it would un-delete mid-transaction (and after commit leave
+    // memory keeping a row disk deletes). Unconfirmed state still never
+    // flushes and never hydrates; it may only VETO hydration of its key.
+    // Optimistic PUTs need no mask — their value is in memory, so the
+    // fresh-wins check below already blocks the row.
+    for (const buffer of pendingTx.values()) {
+      if (buffer.get(key)?.op === "delete") return false;
+    }
+    // Pending-truth overlay (ADR-013 rule 2, extended over the in-flight
+    // window by ADR-015): confirmed-but-not-yet-quiesced state outranks
+    // the engine's rows. A pending delete means this row is doomed —
+    // hydrating it would resurrect a semantically-deleted entity into
+    // memory; a pending save means the engine row is stale — hydrate the
+    // pending value instead. Dirty before in-flight: dirty is strictly
+    // newer for the same key.
     if (dirtyDeletes.has(key)) return false;
-    const pending = dirtySaves.get(key);
+    let pending = dirtySaves.get(key);
+    if (pending === undefined) {
+      if (inflightDeletes.has(key)) return false;
+      pending = inflightPuts.get(key);
+    }
     const data = pending !== undefined ? pending : row.data;
     const entityType = key.slice(0, separatorIndex);
     const id = key.slice(separatorIndex + 1);
@@ -545,17 +607,36 @@ export function enablePersistence(
   }
 
   /**
+   * Pending truth for a manifest key (dirty then in-flight, ADR-015):
+   * `null` = a pending delete dooms the row; a ManifestRow = a pending
+   * save outranks the engine; `undefined` = no pending state, ask the
+   * engine.
+   */
+  function pendingManifestRow(key: EntityKey): ManifestRow | null | undefined {
+    if (dirtyDeletes.has(key)) return null;
+    const dirty = dirtySaves.get(key);
+    if (dirty !== undefined) return dirty as ManifestRow;
+    if (inflightDeletes.has(key)) return null;
+    const inflight = inflightPuts.get(key);
+    if (inflight !== undefined) return inflight as ManifestRow;
+    return undefined;
+  }
+
+  /**
    * Read a manifest row: pending state wins over the engine — including
    * pending DELETES (review B4: a removeManifest inside the debounce
    * window must make the scope unreadable immediately, or a remount
-   * hydrateScope resurrects retention under a dead scope).
+   * hydrateScope resurrects retention under a dead scope). Re-checked
+   * AFTER the engine read too: a setManifest/removeManifest landing while
+   * the load is in the engine must outrank whatever the load returns.
    */
   async function readManifestRow(scopeId: string): Promise<ManifestRow | null> {
     const key = manifestKey(scopeId);
-    if (dirtyDeletes.has(key)) return null;
-    const pending = dirtySaves.get(key);
-    if (pending) return pending as ManifestRow;
+    const before = pendingManifestRow(key);
+    if (before !== undefined) return before;
     const rows = await engine.loadMany([key]);
+    const after = pendingManifestRow(key);
+    if (after !== undefined) return after;
     return rows.length > 0 ? (rows[0].data as ManifestRow) : null;
   }
 
@@ -629,6 +710,10 @@ export function enablePersistence(
         }
       } finally {
         booting = false;
+        // Boot's load snapshots are fully consumed — the overlay slice a
+        // mid-boot direct flush() parked (lifecycle listeners, dispose,
+        // app code) can quiesce now (ADR-015 rule 2).
+        maybeClearInflight();
       }
 
       // Writes that happened while the engine was opening or hydrating
@@ -709,29 +794,50 @@ export function enablePersistence(
     await ready;
     if (disabled || disposed) return 0;
 
-    const manifest = await readManifestRow(scopeId);
-    // Liveness after EVERY await (reviews B3/B4): a dispose() or
-    // removeManifest() that landed while we were in the engine must win —
-    // hydrating or retaining under a dead scope pins entities forever.
-    if (!manifest || disposed || !manifestScopes.has(scopeId)) return 0;
+    // Bracket the read-and-consume region (ADR-015 rule 2): while this is
+    // open, a batch acked mid-read must keep its overlay slice — the rows
+    // below may be a snapshot predating the ack.
+    activeHydrations++;
+    try {
+      const manifest = await readManifestRow(scopeId);
+      // Liveness after EVERY await (reviews B3/B4): a dispose() or
+      // removeManifest() that landed while we were in the engine must win —
+      // hydrating or retaining under a dead scope pins entities forever.
+      if (!manifest || disposed || !manifestScopes.has(scopeId)) return 0;
 
-    // Load only what memory lacks; retain everything the scope references.
-    const missing = manifest.keys.filter((key) => {
-      const separatorIndex = key.indexOf(":");
-      return (
-        separatorIndex !== -1 &&
-        !store.has(key.slice(0, separatorIndex), key.slice(separatorIndex + 1))
-      );
-    });
-    const rows = missing.length > 0 ? await engine.loadMany(missing) : [];
-    if (disposed || !manifestScopes.has(scopeId)) return 0;
+      // Load only what memory lacks; retain everything the scope references.
+      const missing = manifest.keys.filter((key) => {
+        const separatorIndex = key.indexOf(":");
+        return (
+          separatorIndex !== -1 &&
+          !store.has(key.slice(0, separatorIndex), key.slice(separatorIndex + 1))
+        );
+      });
+      const rows = missing.length > 0 ? await engine.loadMany(missing) : [];
+      if (disposed || !manifestScopes.has(scopeId)) return 0;
 
-    let hydrated = 0;
-    for (const row of rows) {
-      if (hydrateRow(row)) hydrated++;
+      let hydrated = 0;
+      const returned = new Set<EntityKey>();
+      for (const row of rows) {
+        returned.add(row.key);
+        if (hydrateRow(row)) hydrated++;
+      }
+      // Synthesis (ADR-015 rule 3): a manifest-declared key whose ONLY
+      // copy is a pending save has no engine row for the loop above to
+      // reconcile — hydrate it from the pending value directly (the
+      // set→evict-before-first-flush window). hydrateRow re-derives the
+      // overlay itself, so a newer pending delete still vetoes.
+      for (const key of missing) {
+        if (returned.has(key)) continue;
+        const pending = dirtySaves.get(key) ?? inflightPuts.get(key);
+        if (pending !== undefined && hydrateRow({ key, data: pending })) hydrated++;
+      }
+      for (const key of manifest.keys) retainUnder(scopeId, key);
+      return hydrated;
+    } finally {
+      activeHydrations--;
+      maybeClearInflight();
     }
-    for (const key of manifest.keys) retainUnder(scopeId, key);
-    return hydrated;
   }
 
   async function preload(scopeIds?: string[]): Promise<number> {
