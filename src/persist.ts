@@ -309,10 +309,14 @@ export function enablePersistence(
       dirtySaves.delete(key);
     } else if (event.type === "evict") {
       // Cache eviction (gc) — the entity leaves the memory projection but
-      // the durable row MUST survive so it can re-hydrate next session.
-      // Drop any pending save for it (the last flushed value stands), but
-      // never translate eviction into a delete (ADR-004).
-      dirtySaves.delete(key);
+      // the durable layer is UNTOUCHED: never a delete (ADR-004), and any
+      // pending save stays queued and flushes (ADR-013). Cancelling the
+      // save here was the DAN-621 resurrection bug: after remove→set
+      // within one debounce window, the set's save is the only thing
+      // correcting a durable row the remove already invalidated — dropping
+      // it let the stale pre-remove row stand and resurrect on next boot.
+      // Eviction has no authority over the durability pipeline.
+      return;
     }
     scheduleFlush();
   });
@@ -418,11 +422,22 @@ export function enablePersistence(
     const key = row.key;
     const separatorIndex = key.indexOf(":");
     if (separatorIndex === -1) return false;
+    // Pending-truth overlay (ADR-013 rule 2 — the readManifestRow/B4
+    // principle generalized to entity rows): confirmed-but-unflushed state
+    // outranks the engine's flushed rows. A pending delete means this row
+    // is doomed — hydrating it would resurrect a semantically-deleted
+    // entity into memory; a pending save means the engine row is stale —
+    // hydrate the pending value instead. Uncommitted transaction buffers
+    // (pendingTx) are deliberately NOT consulted: unconfirmed state must
+    // neither flush nor hydrate.
+    if (dirtyDeletes.has(key)) return false;
+    const pending = dirtySaves.get(key);
+    const data = pending !== undefined ? pending : row.data;
     const entityType = key.slice(0, separatorIndex);
     const id = key.slice(separatorIndex + 1);
     if (store.has(entityType, id)) return false;
     store.runWith({ origin: "hydration" }, () =>
-      store.set(entityType, id, decodeEntityRefs(row.data) as EntityRecord),
+      store.set(entityType, id, decodeEntityRefs(data) as EntityRecord),
     );
     return true;
   }
@@ -467,10 +482,11 @@ export function enablePersistence(
    * THE gc trigger (audit item: `gc()` is otherwise never invoked).
    * Debounced so a burst of removeManifest calls sweeps once.
    *
-   * The sweep FLUSHES FIRST (review B2): evict drops an entity's pending
-   * save (ADR-004 — "the last flushed value stands"), so sweeping before
-   * flush would destroy the only copy of an unflushed write, from memory
-   * AND disk. Never sweeps in degraded mode (review A3): with the engine
+   * The sweep FLUSHES FIRST (review B2). Under ADR-013 evict no longer
+   * cancels pending saves, so sweeping first can't destroy an unflushed
+   * write anymore — but the ordering stays: evicted entities' rows should
+   * be durable BEFORE their memory copy disappears, not a debounce window
+   * later. Never sweeps in degraded mode (review A3): with the engine
    * dead, memory is the ONLY copy — evict-is-safe doesn't hold.
    */
   function scheduleGcSweep(): void {
