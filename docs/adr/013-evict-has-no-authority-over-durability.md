@@ -103,7 +103,12 @@ now "the last confirmed value" — strictly more truthful.
   to a debounce window of confirmed updates on every manual evict.
 - Positive: hydration can no longer resurrect a row the current session
   already removed (pre-boot `remove`, or remount `hydrateScope` racing
-  the debounce window).
+  the debounce window). Boundary: the overlay covers the *dirty* window
+  only — once `flush()` drains the dirty sets, an in-flight
+  `engine.writeBatch` is invisible to the overlay, so a `hydrateScope`
+  racing that in-flight window can still page in the pre-batch engine
+  row (pre-existing class, narrowed by this ADR, tracked in the
+  in-flight-overlay follow-up ticket).
 - Negative: an evicted entity with a pending save now costs one row in
   the next flush batch instead of zero writes. The gc path is unaffected
   (sweep pre-flushes, so its evicts see clean keys); only manual
