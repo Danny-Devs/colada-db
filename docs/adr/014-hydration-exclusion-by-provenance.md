@@ -84,9 +84,12 @@ their current mid-boot semantics — see Consequences.
   `visibilitychange`/`beforeunload` lifecycle listeners call `flush()` and are
   automatic entries (a tab hidden during boot walks straight in — gauntlet F1,
   executed). The path stays open because `dispose()` racing boot and unload
-  MUST flush acknowledged dirt or it dies with the tab (C2). Tracked with the
-  in-flight-overlay follow-up (which also owns the uncommitted-optimistic-
-  remove-racing-boot flavor, gauntlet F2).
+  MUST flush acknowledged dirt or it dies with the tab (C2). CLOSED by
+  ADR-015 (DAN-629): the drained batch stays overlay-visible in the
+  in-flight sets, and `booting` holds the overlay open until boot's load
+  snapshots are fully consumed — a mid-boot direct flush can no longer
+  blind the overlay (ADR-015 also closed the uncommitted-optimistic-
+  remove-racing-boot flavor, gauntlet F2, via the optimistic-delete mask).
 - Semantics note: a listener that reacts to a hydration event by writing
   *synchronously inside the delivery* inherits the `hydration` origin
   (`runWith` is still on the stack) and is therefore not persisted — identical

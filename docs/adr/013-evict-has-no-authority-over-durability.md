@@ -107,8 +107,9 @@ now "the last confirmed value" — strictly more truthful.
   only — once `flush()` drains the dirty sets, an in-flight
   `engine.writeBatch` is invisible to the overlay, so a `hydrateScope`
   racing that in-flight window can still page in the pre-batch engine
-  row (pre-existing class, narrowed by this ADR, tracked in the
-  in-flight-overlay follow-up ticket).
+  row (pre-existing class, narrowed by this ADR — CLOSED by ADR-015:
+  the drain is now a move into a quiescence-gated in-flight overlay,
+  DAN-629).
 - Negative: an evicted entity with a pending save now costs one row in
   the next flush batch instead of zero writes. The gc path is unaffected
   (sweep pre-flushes, so its evicts see clean keys); only manual
@@ -116,3 +117,7 @@ now "the last confirmed value" — strictly more truthful.
 - Note: uncommitted transaction buffers (`pendingTx`) are deliberately
   NOT part of the pending-truth overlay — they are unconfirmed and must
   neither flush nor hydrate (`docs/design/optimistic-durability.md`).
+  [Amended by ADR-015: still never flushes, never hydrates — but an
+  uncommitted optimistic DELETE now masks hydration of its key, so a
+  stale load snapshot cannot un-delete an optimistic projection
+  mid-transaction (DAN-630 gauntlet F2).]
