@@ -4,6 +4,81 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-07-23] — Node package SELF-REFERENCE resolves `import("your-pkg")` to the workspace, so a consumer smoke test that lives inside the package never opens the tarball
+
+**Mistake:** the DAN-658 `engines-floor` CI job exists for exactly one purpose —
+prove the *packed tarball* installs and runs on Node 18, the version
+`engines.node` promises. It did this:
+
+```yaml
+mkdir -p "$RUNNER_TEMP/floor" && cd "$RUNNER_TEMP/floor"
+npm init -y
+npm install "$RUNNER_TEMP"/colada-db-*.tgz "@vue/reactivity@$VUE_RANGE"
+node "$GITHUB_WORKSPACE/scripts/smoke-consumer.mjs"    # ← the bug
+```
+
+The script does `await import("colada-db")`. Node's **package self-reference**
+rule resolves a bare specifier for a package's own name through the *nearest
+enclosing* `package.json`'s `exports` map — based on **the importing file's
+location, not the process's working directory, and without consulting any
+`node_modules`**. `scripts/smoke-consumer.mjs` lives inside the `colada-db`
+package, so `import("colada-db")` loaded `$GITHUB_WORKSPACE/dist/index.mjs`: the
+local build. The `cd` into the consumer directory did nothing. The `npm install`
+was decorative.
+
+Measured 2026-07-23, all three cases executed:
+
+| consumer dir contains | script location | result |
+|---|---|---|
+| a bare `package.json`, **nothing installed** | inside the package | **exit 0 — every assertion green**, including "✔ colada-db runs on the claimed engines floor" |
+| a tarball built with `files: ["LICENSE","README.md"]` (ships no `dist`) | inside the package | **exit 0** |
+| nothing installed | copied into the consumer dir | exit 1, `ERR_MODULE_NOT_FOUND 'colada-db'` |
+| the real tarball | copied into the consumer dir | exit 0 |
+| the `files`-stripped tarball | copied into the consumer dir | exit 1, `ERR_MODULE_NOT_FOUND .../dist/sqlite-worker.mjs` |
+
+So the one job in the repo whose entire job was to open the tarball never opened
+it, and had never once executed against input it was supposed to reject.
+
+**Why it happened:** the author reasoned carefully about the *install* location
+— there is a comment explaining why the consumer dir must be outside the
+workspace, so the repo `.npmrc` and pnpm's linked layout cannot contaminate the
+test — and did not consider that the *script's* location is what determines bare-
+specifier resolution. Self-reference is a real, spec'd, on-by-default Node
+feature that most people meet only as a convenience ("import my own package by
+name in my own tests"). Nothing about it is visible at the call site: the import
+looks identical whether it resolves to `node_modules` or to the workspace. And it
+fails in the flattering direction — it makes a broken artifact look fine.
+
+**Fix:** the workflow now **copies the script into the consumer directory** before
+running it, so the importing file is no longer inside the package:
+
+```yaml
+cp "$GITHUB_WORKSPACE/scripts/smoke-consumer.mjs" ./smoke-consumer.mjs
+node ./smoke-consumer.mjs
+```
+
+And because a `cp` in a YAML file is easy to "simplify" away later, the script
+itself now **fails closed** before it asserts anything: it resolves
+`colada-db/package.json` via `createRequire(import.meta.url)` (works on Node 18,
+unlike `import.meta.resolve`) and refuses to continue unless the resolved path
+contains a `node_modules` segment. Run it in place and it exits 1 with an
+explanation, instead of silently testing the wrong artifact. `dist/sqlite-worker.mjs`
+— the second published entry point, previously ungated entirely — is imported
+there too.
+
+**For future agents:** **a "consumer" test must be run from a file that is not
+inside the package.** If the importing file lives in the repo, `import("your-pkg")`
+is a self-reference and you are testing your working tree, not what you shipped.
+The general form of this trap is the one this repo has now hit five times in a
+day — *a check that reports success on a question it never evaluated*
+(`grep -c` exiting 1 on success; `! grep -q` no-oping under `set -e`; a lint
+reporting clean on a scan that never opened the file; an absence assertion over a
+zero-byte file; and this). The defense is always the same and it is not code
+review: **make the gate go red on purpose, against a deliberately broken subject,
+before you believe it went green.** For an artifact gate specifically, the
+cheapest such subject is a tarball with `files` stripped — build it, install it,
+and watch the job fail.
+
 ## [2026-07-23] — `set -e` is IGNORED for `!`-negated commands, so `! grep -q ...` is a shell assertion that cannot fail
 
 **Mistake:** the DAN-658 CI workflow cross-checked the publish surface with the

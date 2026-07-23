@@ -24,5 +24,6 @@ pnpm -r typecheck
 pnpm -r lint
 pnpm -r build
 node scripts/check-publish-surface.mjs
+bash scripts/check-pack-manifest.sh
 
 echo "pre-push: gate green"

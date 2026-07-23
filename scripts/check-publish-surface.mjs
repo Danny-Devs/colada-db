@@ -42,6 +42,31 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
+ * The SUBJECT floor — every artifact this script asserts about must first be
+ * proved substantive.
+ *
+ * The anti-vacuity controls below prove each DETECTOR can fire. Nothing proved
+ * the SUBJECT was real, and that gap was measurable: truncating
+ * `dist/index.d.mts` to zero bytes made this script report green, because an
+ * empty file contains no forbidden substring by definition. The ADR-019
+ * framework-free claim was, in that state, asserted against nothing at all.
+ * (Deletion was caught here, by the `readFileSync` try/catch — but the shell
+ * cross-check reported "✔ 4 invariants" on a DELETED file, since `grep` exits 2
+ * on a missing path and an `if` reads that as "no match".)
+ *
+ * `minBytes` is a floor, deliberately loose — it exists to catch a stub or a
+ * truncation, not to police size. `anchor` is the sharper half: a literal every
+ * healthy build emits, so a file rewritten into a plausible-looking husk still
+ * fails. Both must hold before a single assertion below is trusted.
+ */
+const SUBJECTS = {
+  "dist/index.d.mts": { minBytes: 10_000, anchor: "declare function createEntityStore" },
+  "dist/index.mjs": { minBytes: 10_000, anchor: "function createEntityStore" },
+  "dist/sqlite-worker.d.mts": { minBytes: 200, anchor: "declare function runSqliteWorker" },
+  "dist/sqlite-worker.mjs": { minBytes: 500, anchor: "function runSqliteWorker" },
+};
+
+/**
  * The invariants, as data.
  *
  * `mustContain` / `mustNotContain` are plain substrings, never regexes — the
@@ -55,7 +80,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INVARIANTS = [
   {
     id: "no-plugin-branding",
-    files: ["dist/index.d.mts", "dist/index.mjs"],
+    files: [
+      "dist/index.d.mts",
+      "dist/index.mjs",
+      "dist/sqlite-worker.d.mts",
+      "dist/sqlite-worker.mjs",
+    ],
     mustNotContain: "pinia-colada-plugin-normalizer",
     control: "from 'pinia-colada-plugin-normalizer';",
     why:
@@ -63,7 +93,10 @@ const INVARIANTS = [
       "(AGENTS.md, ADR-018). The originating plugin's name must not appear in " +
       "the shipped artifact — it misrepresents the dependency direction to " +
       "anyone reading the bundle, and it is exactly the leak an extraction " +
-      "re-introduces without anyone editing the file it appears in.",
+      "re-introduces without anyone editing the file it appears in. " +
+      "`./sqlite-worker` is a published entry point (`exports`) and was outside " +
+      "every publish assertion until 2026-07-23, which made this invariant " +
+      "blind to half of what ships.",
   },
   {
     id: "strippable-node-env",
@@ -81,7 +114,7 @@ const INVARIANTS = [
   },
   {
     id: "no-optional-chained-node-env",
-    files: ["dist/index.mjs"],
+    files: ["dist/index.mjs", "dist/sqlite-worker.mjs"],
     mustNotContain: "process.env?.NODE_ENV",
     control: "typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production'",
     why:
@@ -94,7 +127,7 @@ const INVARIANTS = [
   },
   {
     id: "framework-free-types",
-    files: ["dist/index.d.mts"],
+    files: ["dist/index.d.mts", "dist/sqlite-worker.d.mts"],
     mustNotContain: "@vue/reactivity",
     control: "import type { Ref } from '@vue/reactivity';",
     why:
@@ -142,29 +175,82 @@ if (failed) {
   process.exit(1);
 }
 
-// ── Pass 2: the real artifact ───────────────────────────────────────────────
+// ── Pass 1.5: the subjects must be substantive ──────────────────────────────
+// A working detector aimed at an empty file is still nothing. Every artifact any
+// invariant names must exist, clear a byte floor, and contain an anchor a
+// healthy build always emits — BEFORE any assertion is trusted. Every file in
+// `inv.files` must also be declared in SUBJECTS, so adding a file to an
+// invariant cannot smuggle in an unfloored subject.
 const cache = new Map();
 function read(relPath) {
   if (!cache.has(relPath)) cache.set(relPath, readFileSync(join(root, relPath), "utf8"));
   return cache.get(relPath);
 }
 
+const subjectPaths = [...new Set(INVARIANTS.flatMap((inv) => inv.files))].sort();
+for (const relPath of subjectPaths) {
+  const spec = SUBJECTS[relPath];
+  if (spec === undefined) {
+    failed = true;
+    console.error(
+      `✗ UNFLOORED SUBJECT: "${relPath}" is asserted about but has no entry in ` +
+        `SUBJECTS.\n  Declare a minBytes floor and an anchor for it, or the ` +
+        `assertions about it can pass over a truncated or stubbed file.`,
+    );
+    continue;
+  }
+
+  let text;
+  try {
+    text = read(relPath);
+  } catch (err) {
+    failed = true;
+    console.error(
+      `✗ ${relPath} is MISSING — the publish-surface gate cannot run.\n` +
+        `  ${err?.code ?? err}\n` +
+        `  This script asserts against BUILT output; run \`pnpm build\` first. ` +
+        `An absence assertion over a missing file passes for the wrong reason.`,
+    );
+    continue;
+  }
+
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes < spec.minBytes) {
+    failed = true;
+    console.error(
+      `✗ ${relPath} is NOT SUBSTANTIVE: ${bytes} bytes, floor is ` +
+        `${spec.minBytes}.\n  Every "must not contain" assertion about this ` +
+        `file would pass simply because there is nothing in it. If the build ` +
+        `legitimately shrank this much, that is the finding — lower the floor ` +
+        `deliberately, with the reason.`,
+    );
+    continue;
+  }
+
+  if (!text.includes(spec.anchor)) {
+    failed = true;
+    console.error(
+      `✗ ${relPath} is missing its anchor ${JSON.stringify(spec.anchor)}.\n` +
+        `  The file is present and large enough but does not contain what a ` +
+        `healthy build always emits, so it is not the artifact these ` +
+        `assertions are about. Investigate the build before touching this ` +
+        `anchor.`,
+    );
+  }
+}
+
+if (failed) {
+  console.error("\nRefusing to assert against dist/ with a missing or hollow artifact.");
+  process.exit(1);
+}
+
+// ── Pass 2: the real artifact ───────────────────────────────────────────────
+// Every file is already cached and floored by Pass 1.5, so `read` cannot throw
+// here — the missing-file path is handled above, where it belongs.
 let checks = 0;
 for (const inv of INVARIANTS) {
   for (const relPath of inv.files) {
-    let text;
-    try {
-      text = read(relPath);
-    } catch {
-      failed = true;
-      console.error(
-        `✗ ${relPath} is missing — the publish-surface gate cannot run.\n` +
-          `  This script asserts against BUILT output; run \`pnpm build\` first.`,
-      );
-      continue;
-    }
-
-    const problem = violation(inv, text);
+    const problem = violation(inv, read(relPath));
     checks += 1;
     if (problem !== null) {
       failed = true;
@@ -177,5 +263,6 @@ if (failed) process.exit(1);
 
 console.log(
   `✔ publish surface holds — ${checks} assertions across ` +
-    `${cache.size} artifacts, ${INVARIANTS.length} detectors self-tested`,
+    `${cache.size} artifacts (each floored for size + anchor), ` +
+    `${INVARIANTS.length} detectors self-tested`,
 );

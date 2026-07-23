@@ -121,15 +121,16 @@ jobs:
       - name: Cross-check publish surface (independent implementation)
         run: bash scripts/cross-check-publish-surface.sh
 
-      # The `files` allowlist decides what a consumer actually receives. A
-      # `pnpm pack` that fails, or that silently omits dist, is a publish-day
-      # discovery otherwise — and publish day is the one day nobody wants a
-      # surprise. Cheap here, expensive there.
-      - name: Pack
-        run: |
-          set -euo pipefail
-          pnpm pack --pack-destination "$RUNNER_TEMP"
-          tar -tzf "$RUNNER_TEMP"/colada-db-*.tgz | sort
+      # The `files` allowlist decides what a consumer actually receives, so it
+      # is asserted against a checked-in expected manifest — in BOTH directions.
+      #
+      # This step used to `pnpm pack` and print `tar -tzf | sort`. Printing is
+      # not asserting: a file that should ship but stopped shipping went green,
+      # and a file that should NEVER ship (`.env`, `src/`, a stray fixture) went
+      # green too. Combined with the engines-floor self-reference bug fixed in
+      # the same pass, the allowlist had zero coverage in either direction.
+      - name: Pack and assert the publish manifest
+        run: bash scripts/check-pack-manifest.sh
 
   # ── The `engines` claim, actually tested ───────────────────────────────────
   # `engines.node: ">=18"` is a promise to consumers. Nothing verified it, and
@@ -178,4 +179,13 @@ jobs:
           npm init -y > /dev/null
           npm pkg set type=module > /dev/null
           npm install --no-audit --no-fund "$RUNNER_TEMP"/colada-db-*.tgz "@vue/reactivity@$VUE_RANGE"
-          node "$GITHUB_WORKSPACE/scripts/smoke-consumer.mjs"
+          # The script must be COPIED here, never run from $GITHUB_WORKSPACE.
+          # Node's package self-reference rule resolves `import("colada-db")`
+          # through the *enclosing* package's own `exports` map when the
+          # importing file lives inside the package — so running it in place
+          # loaded $GITHUB_WORKSPACE/dist and never opened the tarball. Measured
+          # 2026-07-23: this job was green against a consumer dir with NOTHING
+          # installed, and green against a tarball shipping no `dist` at all.
+          # See LESSONS.md 2026-07-23 and the header of the script itself.
+          cp "$GITHUB_WORKSPACE/scripts/smoke-consumer.mjs" ./smoke-consumer.mjs
+          node ./smoke-consumer.mjs
