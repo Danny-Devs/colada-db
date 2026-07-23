@@ -194,8 +194,10 @@ the `disposed` guard via an internal `final` param threaded through the
 re-entrancy; `disposed` stays SYNCHRONOUS so the boot/hydration post-await
 guards keep firing; the public `flush` wrapper hides `final` so external
 callers still no-op post-dispose) + `src/dispose-flush.spec.ts` (4 tests,
-2 verified failing pre-fix — the strongest available encoding) + this
-entry. Deferring the flag instead was rejected: it reopens the boot guards
+3 verified failing pre-fix — the single-write test's residue is dropped by the
+same bug so it doubles as a failing repro; only the post-dispose-sneak-in test
+is a pure pin — the strongest available encoding) + this entry. Deferring the
+flag instead was rejected: it reopens the boot guards
 that stop retention/hydration from outliving the coordinator.
 
 **For future agents:** a lifecycle flag that means "stop accepting new
