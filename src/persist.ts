@@ -409,19 +409,35 @@ export function enablePersistence(
 
   let inflightFlush: Promise<void> | null = null;
 
-  async function flush(): Promise<void> {
+  // `final` is the internal dispose-drain flag — NEVER exposed on the public
+  // handle (see the returned object). It grants exactly ONE exemption from the
+  // `disposed` guard: the dispose()-driven final flush. `disposed` is set
+  // synchronously in dispose() (so the boot/hydration post-await guards keep
+  // firing) — but that same flag otherwise defeats BOTH recovery paths the
+  // final flush needs when it races an in-flight batch: (a) the re-entrant
+  // `return flush()` below would bail on `disposed`, and (b) the in-flight
+  // batch's tail `scheduleFlush()` short-circuits on `disposed` too. So a
+  // `set(Y)`/`remove(Y)` that entered the dirty sets AFTER a prior flush
+  // drained and parked in `writeBatch` would be silently dropped at teardown
+  // (DAN-647). Threading `final` through the recursion lets the final flush
+  // drain that residue while a plain `flush()` (external caller, debounce
+  // timer, gc sweep, lifecycle listener) still no-ops once `disposed` — so a
+  // post-dispose external write can never sneak a batch in.
+  async function flush(final = false): Promise<void> {
     if (flushTimer) {
       clearTimeout(flushTimer);
       flushTimer = null;
     }
-    if (!opened || disabled || disposed) return;
+    if (!opened || disabled || (disposed && !final)) return;
     // Concurrency contract: `await flush()` means "everything dirty as of
     // this call is durable when I resolve". If a flush is in-flight, wait
     // for it, then flush again — writes that arrived DURING the in-flight
-    // batch are in the dirty sets and must not be silently skipped.
+    // batch are in the dirty sets and must not be silently skipped. The
+    // `final` flag propagates so the dispose drain survives its own
+    // re-entrancy after `disposed` flips.
     if (flushing) {
       await inflightFlush;
-      return flush();
+      return flush(final);
     }
     if (dirtySaves.size === 0 && dirtyDeletes.size === 0 && !indexDirty) return;
 
@@ -870,6 +886,16 @@ export function enablePersistence(
     // UNCOMMITTED transactions are deliberately NOT flushed: they were
     // never confirmed, so they die with the session (the app's mutation
     // re-runs or fails visibly — see the durability-window guide).
+    //
+    // Contract (DAN-647): the final flush drains EVERYTHING confirmed,
+    // including writes that entered the dirty sets AFTER a prior flush drained
+    // and parked in `writeBatch` — `flush(true)` is immune to the `disposed`
+    // guard so its own re-entrant re-flush (and thus that residue) survives
+    // `disposed` flipping. New EXTERNAL flushes stay rejected: `flush(true)`
+    // is unreachable from the public handle, and a post-dispose `set` can't
+    // reach the subscriber (`unsub()` above + the `disposed` guard). Idempotent
+    // (second dispose is a no-op) and single-flush (dirty/in-flight sets are
+    // disjoint per key; the drain is a move — no key is written twice).
     unsub();
     settledUnsub?.();
     settledUnsub = null;
@@ -891,10 +917,21 @@ export function enablePersistence(
     if (typeof window !== "undefined") {
       window.removeEventListener("beforeunload", onBeforeUnload);
     }
-    const finalFlush = opened && !disabled ? flush() : Promise.resolve();
+    const finalFlush = opened && !disabled ? flush(true) : Promise.resolve();
     disposed = true;
     void finalFlush.catch(() => {}).then(() => engine.close());
   }
 
-  return { ready, durable, flush, setManifest, removeManifest, hydrateScope, preload, dispose };
+  // `flush` is wrapped so the public handle can NEVER pass `final` — only
+  // dispose()'s internal drain may bypass the `disposed` guard (DAN-647).
+  return {
+    ready,
+    durable,
+    flush: () => flush(),
+    setManifest,
+    removeManifest,
+    hydrateScope,
+    preload,
+    dispose,
+  };
 }

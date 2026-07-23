@@ -165,3 +165,44 @@ moving entries to a visible in-flight stage, and retire that stage only
 at quiescence (acknowledged AND no reader that might predate the ack
 still running), never at hand-off. If you find yourself clearing shared
 state right before an `await`, list every reader of that state first.
+
+## [2026-07-22] — a teardown flag that stops NEW work must not also stop the in-flight work's own completion
+
+**Mistake:** `dispose()` set `disposed = true` right after kicking off its
+final `flush()`. That flush, racing a prior batch still parked in
+`await engine.writeBatch`, took the re-entrant `await inflightFlush;
+return flush()` path — and the re-entrant `flush()` then bailed on the
+`disposed` guard that had flipped true in the meantime. The in-flight
+batch's own tail recovery (`if (dirtySaves.size>0) scheduleFlush()`) was
+defeated by the SAME flag. A `set(Y)`/`remove(Y)` that entered the dirty
+sets after the first drain parked was silently non-durable — the exact
+data-loss `dispose()`'s final flush exists to prevent (DAN-647; only real
+async engines expose it — a sync engine resolves the batch before dispose
+runs).
+
+**Why it happened:** `disposed` conflated two jobs — "reject NEW work"
+(new subscriber events, new timers, new external flushes) and "this
+coordinator is torn down" — and the final flush is neither: it is the
+in-flight completion of work already acknowledged BEFORE teardown. A flag
+raised to stop the future also stopped the present from finishing. The
+tell was the async gap: the flag was read once at the flush's synchronous
+entry (false) and again at its post-`await` continuation (true), the same
+"state shifted across the await" shape as ADR-012–016.
+
+**Fix:** ADR-017 (the final flush gets a single unforgeable exemption from
+the `disposed` guard via an internal `final` param threaded through the
+re-entrancy; `disposed` stays SYNCHRONOUS so the boot/hydration post-await
+guards keep firing; the public `flush` wrapper hides `final` so external
+callers still no-op post-dispose) + `src/dispose-flush.spec.ts` (4 tests,
+3 verified failing pre-fix — the single-write test's residue is dropped by the
+same bug so it doubles as a failing repro; only the post-dispose-sneak-in test
+is a pure pin — the strongest available encoding) + this entry. Deferring the
+flag instead was rejected: it reopens the boot guards
+that stop retention/hydration from outliving the coordinator.
+
+**For future agents:** a lifecycle flag that means "stop accepting new
+work" must never gate the completion of work already in flight. When a
+teardown/pause flag guards a code path, ask whether that path is starting
+NEW work or finishing ALREADY-ACCEPTED work — exempt the latter (thread an
+explicit `final`/`draining` token through it), and never solve it by
+deferring the flag, which un-guards everything else the flag protects.
