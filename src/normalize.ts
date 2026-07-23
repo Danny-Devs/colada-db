@@ -5,8 +5,8 @@
  * denormalize(): walk data, resolve EntityRefs back to live store entities
  *                with structural sharing and circular-ref protection.
  *
- * Extracted from pinia-colada-plugin-normalizer's plugin.ts (chip 2, 2026-07-19);
- * bodies unchanged.
+ * Extracted from the Pinia Colada normalizer plugin's plugin.ts (chip 2,
+ * 2026-07-19); bodies unchanged.
  */
 import type {
   EntityRecord,

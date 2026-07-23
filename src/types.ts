@@ -1,9 +1,10 @@
 /**
- * pinia-colada-plugin-normalizer
+ * colada-db
  *
- * Normalized entity caching plugin for Pinia Colada.
+ * AI-first, local-first client database — a normalized reactive entity store
+ * with pluggable durability engines (IndexedDB, OPFS SQLite).
  *
- * @module pinia-colada-plugin-normalizer
+ * @module colada-db
  */
 
 import type { ComputedRef, ShallowRef } from "@vue/reactivity";
@@ -22,6 +23,31 @@ export type EntityRecord = Record<string, unknown>;
  * Composite key that uniquely identifies an entity: type + id.
  *
  * @example 'contact:42', 'order:abc-123'
+ *
+ * ## Known sharp edge (DAN-649/A6 — deliberately deferred, not overlooked)
+ *
+ * This is a template-literal type, not a nominal brand, so it accepts ANY
+ * string containing at least one colon — including a bare `"a:b"` that never
+ * came from an entity. More consequentially, every reader splits on the FIRST
+ * colon (`key.indexOf(":")`, 8 sites across `store.ts`, `persist.ts`,
+ * `normalize.ts`), so an entity TYPE that itself contains a colon round-trips
+ * incorrectly: `"my:type"` + id `"1"` encodes to `"my:type:1"` and decodes back
+ * as type `"my"`, id `"type:1"`.
+ *
+ * A true brand plus a `toEntityKey()` constructor would make the sharp edge
+ * unrepresentable — the decoder half already exists as the exported
+ * `splitEntityKey()`, which is where the first-colon rule is implemented. The
+ * brand was measured and deferred rather than attempted here, because
+ * `EntityKey` is load-bearing in the {@link StorageEngine} PORT CONTRACT
+ * (`loadAll`, `loadMany`, `writeBatch`): branding it is a breaking change for
+ * every third-party engine implementation (ADR-006 / ADR-008 §2), so it needs
+ * its own ADR and its own review — the same reasoning that split the
+ * ColadaRef read-type change out to DAN-656. It also crosses two surfaces
+ * this ticket was scoped away from (`engines/` protocol internals and
+ * `transactions.ts`).
+ *
+ * Until then the contract is by convention: entity type names MUST NOT contain
+ * a colon.
  */
 export type EntityKey = `${string}:${string}`;
 
@@ -577,9 +603,25 @@ export function defineEntity<T extends EntityRecord = EntityRecord>(
 /**
  * Symbol used to mark objects as entity references.
  * Using a Symbol prevents collision with any API data.
- * @internal
+ *
+ * Registered via `Symbol.for` (the cross-realm global symbol registry) rather
+ * than `Symbol()`, so that two copies of colada-db loaded in one page agree on
+ * ref identity. With a plain `Symbol()` the marker is per-module-instance:
+ * `isEntityRef` in copy A returns `false` for a ref minted by copy B, and refs
+ * silently degrade to opaque data. That is not hypothetical — the chip-3
+ * migration has the Pinia Colada adapter carrying its own engine copy
+ * alongside an app-level `colada-db` (see AGENTS.md), which is exactly the
+ * duplicate-instance case this closes.
+ *
+ * Scope note: this marker is in-memory identity ONLY and is never serialized —
+ * the wire/disk format uses the string key `__cdb_ref` (ADR-018), whose
+ * shape+type validation was hardened separately in DAN-648. Changing this
+ * symbol therefore cannot affect any persisted data.
+ *
+ * @remarks Exported from the package barrel. Its formal public-vs-internal
+ * classification is settled by DAN-656, which owns the ref read-type surface.
  */
-export const ENTITY_REF_MARKER = Symbol("pinia-colada-entity-ref");
+export const ENTITY_REF_MARKER = Symbol.for("colada-db/entity-ref");
 
 /**
  * An entity reference that replaces the actual entity data in the query cache.

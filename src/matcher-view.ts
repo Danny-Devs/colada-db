@@ -210,7 +210,7 @@ export function createMatcherView(
 
   // ── Retention wiring (ADR-010: a view = a retaining scope) ──
   const store = resolveBoundaryStore(boundary);
-  if (!store && process.env.NODE_ENV !== "production") {
+  if (!store && typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
     console.warn(
       "[colada-db] matcher-view: boundary has no resolvable store " +
         "(foreign StoreBoundary implementation?) — members will not be " +

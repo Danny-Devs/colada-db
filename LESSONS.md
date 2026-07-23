@@ -4,6 +4,52 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-07-23] — a global your toolchain polyfills away is invisible until it reaches the one user who has no toolchain
+
+**Mistake:** five dev-warning branches read `process.env.NODE_ENV` bare
+(`matcher-view.ts`, `engines/sqlite.ts`, `persist.ts` ×3). `process` is a Node
+global that does not exist in a browser loading `dist/index.mjs` from a CDN, in
+Deno, or in a plain `<script type="module">`. Every one of those reads sat on a
+DEGRADATION path — IndexedDB open failure, writeBatch failure, OPFS
+unavailable, foreign StoreBoundary — so a bundler-less consumer worked
+perfectly until persistence failed, at which point the graceful fallback threw
+`ReferenceError: process is not defined` instead. The crash landed exactly
+where the recovery code was supposed to run, and only for the framework-free
+audience the ADR-008 §4/§5 pillars specifically target (DAN-649/A1).
+
+**Why it happened:** the entire development toolchain hides this defect.
+Vite/webpack/esbuild statically replace `process.env.NODE_ENV` at build time,
+so the identifier is gone before the code ever runs; tests run under Node,
+where `process` is real. Every environment the library is *developed and
+tested* in provides the global, and the one environment that doesn't is the one
+nobody was executing. Compounding it, the placement was maximally quiet: the
+happy path never touches `process`, so no smoke test, demo, or playground
+session could surface it — only an actual storage failure in an actual
+bundler-less page.
+
+**Fix:** the guard `typeof process !== "undefined" && process.env?.NODE_ENV
+!== "production"` at all five sites (it still folds to `false` under a
+bundler's static replacement, so dead-code elimination of the warnings
+survives). The durable encoding is a LINT — `no-unguarded-process-env`
+(`scripts/no-unguarded-process-env.mjs`, wired into `pnpm lint`), AST-based, which
+bans any reference to the global `process` in shipped source unless dominated by
+a `typeof` guard, and whose error message states the *reason* rather than the
+rule name. Plus `src/process-guard.spec.ts` (30), which extracts the real guard
+expressions from source and evaluates them with `process` bound to `undefined`
+— asserting no throw, and (the anti-cheat) that the guard still returns `true`
+in Node/bundler dev, so "fix" can never mean "delete the warning". Verified
+failing pre-fix at both rungs, and the shipped `dist/index.mjs` was executed
+with the global deleted across three degradation paths.
+
+**For future agents:** when a value only exists because a bundler injects it,
+your tests can never see its absence — the toolchain is the thing hiding the
+bug. Any ambient global (`process`, `global`, `__dirname`, `Buffer`,
+`require`) referenced in shipped library code needs a `typeof` guard AND a lint,
+because the failing runtime is by definition the one you are not running.
+Assume it doubly when the reference sits on an error path: degradation code is
+the least-exercised code you ship, so a crash there converts a graceful
+fallback into a hard failure precisely when the user was already in trouble.
+
 ## [2026-07-22] — rebuilding an object key-by-key must never use `obj[key] = v` for `__proto__`
 
 **Mistake:** `encodeEntityRefs` / `decodeEntityRefs` rebuilt objects with

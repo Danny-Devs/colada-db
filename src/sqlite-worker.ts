@@ -1,5 +1,5 @@
 /**
- * SQLite engine — worker entry (`pinia-colada-plugin-normalizer/sqlite-worker`).
+ * SQLite engine — worker entry (`colada-db/sqlite-worker`).
  *
  * Runs inside a dedicated Worker created by the APP (bring-your-own-worker,
  * see sqliteEngine docs) so the app's bundler resolves
@@ -7,7 +7,7 @@
  *
  * ```typescript
  * // app/sqlite.worker.ts — the whole file
- * import { runSqliteWorker } from 'pinia-colada-plugin-normalizer/sqlite-worker'
+ * import { runSqliteWorker } from 'colada-db/sqlite-worker'
  * runSqliteWorker()
  * ```
  *

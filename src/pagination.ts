@@ -1,6 +1,6 @@
 /**
  * Pagination merge recipe factories for `defineEntity({ merge })`.
- * @module pinia-colada-plugin-normalizer/pagination
+ * @module colada-db
  */
 
 import type { EntityRecord } from "./types";
@@ -77,8 +77,8 @@ export interface CursorPaginationOptions<T extends EntityRecord = EntityRecord> 
  *
  * @example
  * ```typescript
- * import { defineEntity } from 'pinia-colada-plugin-normalizer'
- * import { cursorPagination } from 'pinia-colada-plugin-normalizer'
+ * import { defineEntity } from 'colada-db'
+ * import { cursorPagination } from 'colada-db'
  *
  * const contactFeed = defineEntity<ContactFeed>({
  *   idField: 'feedId',
@@ -191,8 +191,8 @@ export interface OffsetPaginationOptions<T extends EntityRecord = EntityRecord> 
  *
  * @example
  * ```typescript
- * import { defineEntity } from 'pinia-colada-plugin-normalizer'
- * import { offsetPagination } from 'pinia-colada-plugin-normalizer'
+ * import { defineEntity } from 'colada-db'
+ * import { offsetPagination } from 'colada-db'
  *
  * const contactList = defineEntity<ContactList>({
  *   idField: 'listId',

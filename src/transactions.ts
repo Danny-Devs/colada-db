@@ -13,7 +13,7 @@
  *   touch the same entity, fold this transaction's mutations into the
  *   stored server truth so a later rollback can't revert confirmed data.
  *
- * Extracted from pinia-colada-plugin-normalizer's composables.ts
+ * Extracted from the Pinia Colada normalizer plugin's composables.ts
  * (chip 2.5, 2026-07-19); logic unchanged. The plugin's
  * `useOptimisticUpdate(pinia)` becomes a thin wrapper over
  * `createOptimisticUpdates(store)`.
