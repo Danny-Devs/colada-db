@@ -1,0 +1,28 @@
+#!/bin/sh
+# Fast local mirror of .github/workflows/ci.yml (DAN-658, ADR-021).
+#
+# OPT-IN — install with `pnpm hooks:install`, remove with `pnpm hooks:uninstall`.
+# Nothing installs this for you. CI is the gate of RECORD; this hook is a
+# courtesy that shortens the feedback loop from "push, wait, read a red X" to
+# "fail before the push leaves the machine". A hook can always be bypassed with
+# `--no-verify`, so treating it as the authority would be a false comfort.
+#
+# It is deliberately event-driven and visible: it runs on an action you took,
+# prints what it is doing, and exits. No daemon, no watcher, no background
+# process.
+#
+# It does NOT mirror the full matrix — one Node version, and it skips the
+# engines-floor consumer install (which needs a Node 18 toolchain switch and a
+# network round-trip). Those live in CI, where waiting is free.
+
+set -e
+
+echo "pre-push: mirroring the CI gate — bypass with 'git push --no-verify'"
+
+CI=true pnpm -r test
+pnpm -r typecheck
+pnpm -r lint
+pnpm -r build
+node scripts/check-publish-surface.mjs
+
+echo "pre-push: gate green"

@@ -45,9 +45,12 @@
   },
   "scripts": {
     "build": "tsdown && node scripts/check-public-types.mjs",
+    "check:publish-surface": "node scripts/check-publish-surface.mjs",
     "fmt": "oxfmt",
+    "hooks:install": "git config core.hooksPath .githooks && echo 'pre-push hook enabled (core.hooksPath=.githooks)'",
+    "hooks:uninstall": "git config --unset core.hooksPath && echo 'pre-push hook disabled'",
     "play": "vite playground",
-    "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test && pnpm lint",
+    "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test && pnpm lint && pnpm check:publish-surface",
     "lint": "oxlint . && node scripts/no-unguarded-process-env.mjs",
     "lint:fix": "oxlint --fix . && node scripts/no-unguarded-process-env.mjs",
     "test": "vitest run",

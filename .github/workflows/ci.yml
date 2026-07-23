@@ -1,0 +1,187 @@
+# CI — the gate of record for colada-db (DAN-658, ADR-021).
+#
+# Before this file existed, every durable encoding in the repo — the 437-test
+# suite, the `no-unguarded-process-env` rule, the DAN-647/648 durability pins,
+# the ADR-019 type-surface gate — fired only when a human remembered to type the
+# command. This workflow is what makes "lint > test > skill > LESSONS.md" true
+# here instead of aspirational.
+#
+# Three jobs, deliberately independent so a failure names itself:
+#   gate            — the four DoR commands, on every Node the TOOLCHAIN supports
+#   publish-surface — textual invariants of the BUILT artifact
+#   engines-floor   — the artifact actually runs on the Node `engines` claims
+#
+# On the Node split (the non-obvious part, see ADR-021): `engines.node` says
+# ">=18", but the dev toolchain floor is 20.19 (tsdown >=20.19, oxlint and vite
+# ^20.19 || >=22.12). Those are two different claims — one about consumers, one
+# about contributors — and a single matrix cannot express both. `gate` covers
+# the toolchain; `engines-floor` covers the consumer promise by installing the
+# packed tarball on Node 18 and importing it. Neither claim is weakened to make
+# the other convenient.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A force-push or a rapid second push supersedes the run it interrupted. `main`
+# is excluded from cancellation: its runs are the historical record of what was
+# green when, and cancelling those loses the answer to "was this ever verified".
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ── The Definition-of-Done gate, exactly as AGENTS.md spells it ────────────
+  # `-r` is workspace-recursive and covers the root AND `packages/*` because the
+  # repo `.npmrc` sets `include-workspace-root=true`. Steps are split so the red
+  # X in the UI names the failing gate without anyone opening the log.
+  gate:
+    name: gate (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One Node version failing is a finding about THAT version. Killing its
+      # siblings throws away the comparison that identifies it as such.
+      fail-fast: false
+      matrix:
+        # The toolchain floor (20.19, via tsdown/oxlint/vite), current LTS, and
+        # current. NOT 18 — see the header and `engines-floor` below.
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Must precede setup-node: `cache: pnpm` resolves the store path by
+      # running pnpm, which has to exist first. Version comes from the
+      # `packageManager` field in package.json — one source of truth.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: CI=true pnpm -r test
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Lint
+        run: pnpm -r lint
+
+      - name: Build
+        run: pnpm -r build
+
+  # ── Textual invariants of the shipped artifact ─────────────────────────────
+  # Separate job, not a fifth step in `gate`: these assertions are about what
+  # gets published, they are Node-version-independent, and a red X labelled
+  # "publish-surface" carries information that a red "gate (node 22)" does not.
+  publish-surface:
+    name: publish surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Primary implementation. Self-tests every detector against a synthetic
+      # counter-example before asserting, so a detector that can no longer fail
+      # is reported as broken rather than green (LESSONS.md 2026-07-23: a gate
+      # that manufactures confidence it has not earned is worse than no gate).
+      - name: Assert publish surface
+        run: node scripts/check-publish-surface.mjs
+
+      # Independent cross-check, different tool, hardcoded paths. This is not
+      # redundant with the step above: the script's positive controls prove each
+      # DETECTOR can fire, but they cannot catch the script reading the wrong
+      # (yet existing) file — a failure mode under which both the controls and
+      # the assertions would pass vacuously. Raw grep against literal paths is
+      # the cheapest thing that fails when that happens.
+      #
+      # Every line is an ASSERTION that exits 0 when the invariant holds. Note
+      # the leading `!` on the absence checks: `grep -c pattern file` exits 1
+      # when the count is zero, so the intuitive "expect 0 matches" spelling
+      # reads a PASS as a FAIL inside a `&&` chain or under `set -e` (DAN-657).
+      - name: Cross-check with raw grep
+        run: |
+          set -euxo pipefail
+          ! grep -q "pinia-colada-plugin-normalizer" dist/index.d.mts dist/index.mjs
+          grep -q "process\.env\.NODE_ENV" dist/index.mjs
+          ! grep -q "process\.env?\.NODE_ENV" dist/index.mjs
+          ! grep -q "@vue/reactivity" dist/index.d.mts
+
+      # The `files` allowlist decides what a consumer actually receives. A
+      # `pnpm pack` that fails, or that silently omits dist, is a publish-day
+      # discovery otherwise — and publish day is the one day nobody wants a
+      # surprise. Cheap here, expensive there.
+      - name: Pack
+        run: |
+          set -euo pipefail
+          pnpm pack --pack-destination "$RUNNER_TEMP"
+          tar -tzf "$RUNNER_TEMP"/colada-db-*.tgz | sort
+
+  # ── The `engines` claim, actually tested ───────────────────────────────────
+  # `engines.node: ">=18"` is a promise to consumers. Nothing verified it, and
+  # the toolchain cannot run on 18, so the promise was untested by construction.
+  # This job builds on a Node the toolchain supports, then switches the runtime
+  # to the claimed floor and consumes the package the way a user would: install
+  # the tarball, import by bare specifier, exercise the store.
+  engines-floor:
+    name: engines floor (node 18 consumer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install and build (toolchain Node)
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Pack
+        run: pnpm pack --pack-destination "$RUNNER_TEMP"
+
+      # Second setup-node call swaps the active runtime in place — no artifact
+      # round-trip between jobs, and the tarball under test is byte-identical to
+      # the one just built.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "18"
+
+      - name: Consume the tarball on the claimed engines floor
+        run: |
+          set -euxo pipefail
+          node -v
+          # Resolve the peer range from the manifest rather than hardcoding a
+          # version, so this cannot drift away from what the repo declares.
+          VUE_RANGE="$(node -p "require('$GITHUB_WORKSPACE/package.json').peerDependencies['@vue/reactivity']")"
+          # Outside the workspace: an npm install inside it would inherit the
+          # repo .npmrc and pnpm's linked layout, testing something other than
+          # what a consumer gets.
+          mkdir -p "$RUNNER_TEMP/floor" && cd "$RUNNER_TEMP/floor"
+          npm init -y > /dev/null
+          npm pkg set type=module > /dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/colada-db-*.tgz "@vue/reactivity@$VUE_RANGE"
+          node "$GITHUB_WORKSPACE/scripts/smoke-consumer.mjs"
