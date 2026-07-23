@@ -11,7 +11,7 @@ import type { EntityKey, StorageEngine } from "../types";
 const STORE_NAME = "entities";
 
 export interface IdbEngineOptions {
-  /** IndexedDB database name. @default 'pcn_entities' */
+  /** IndexedDB database name. @default 'cdb_entities' */
   dbName?: string;
   /**
    * Deadline for a single indexedDB.open() attempt, in ms. Safari/WebKit
@@ -25,7 +25,7 @@ export interface IdbEngineOptions {
 }
 
 export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
-  const { dbName = "pcn_entities", openTimeoutMs = 4000, openAttempts = 2 } = options;
+  const { dbName = "cdb_entities", openTimeoutMs = 4000, openAttempts = 2 } = options;
   let db: IDBDatabase | null = null;
 
   function openDatabase(): Promise<IDBDatabase> {

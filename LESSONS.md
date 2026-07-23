@@ -33,6 +33,30 @@ assignment through a helper that special-cases `__proto__` with
 `Object.defineProperty`. `constructor`/`prototype` are data properties and need
 no guard; `__proto__` is the sole accessor and the sole hazard.
 
+## [2026-07-23] — a rename gate that greps for the retired token trips on tests asserting its absence
+
+**Mistake:** DAN-654's DoD gate is `! grep -rn "__pcn_ref\|pcn_entities" src/`
+(prove no wire/disk position still emits the old identifier). The new round-trip
+test asserted the rename with `expect(author).not.toHaveProperty("__pcn_ref")`
+and an explanatory comment — both of which contain the literal retired token, so
+the gate flagged the test file even though the test is the *opposite* of a
+regression (it proves the old key is gone).
+
+**Why it happened:** a plain `grep` can't tell an emitting occurrence (a wire
+constant, a db name) from a *negative assertion* about that same string. The
+gate's intent is "no code writes the old name"; a test proving the old name is
+absent has to name it.
+
+**Fix:** assert the retired key's absence WITHOUT spelling it — pin the exact
+key set instead: `expect(Object.keys(author).sort()).toEqual(["__cdb_ref",
+"entityType", "id", "key"])`. Same guarantee (no stray heritage key rode along),
+zero literal occurrences of the retired token.
+
+**For future agents:** when a rename ticket ships a `! grep "<old>"` gate, write
+the regression's absence-assertions structurally (exact key set, snapshot shape)
+rather than `not.toHaveProperty("<old>")` — otherwise the test that proves you
+did the rename is what fails the gate that checks the rename.
+
 ## [2026-07-22] — a Symbol in-memory marker with a plain-string wire key reopens the collision the Symbol closed
 
 **Mistake:** `EntityRef` uses a `Symbol` marker specifically to avoid colliding

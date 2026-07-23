@@ -37,6 +37,25 @@ import { createOptimisticUpdates, type TransactionSettledEvent } from "./transac
 const MANIFEST_PREFIX = "__cdb_manifest__:";
 const INDEX_KEY = `${MANIFEST_PREFIX}__index__` as EntityKey;
 
+/**
+ * On-disk/wire format version for the whole colada-db persisted format
+ * (entity wire codec + manifest/index rows). A single monotonic integer
+ * stamped into the manifest INDEX row (its natural home — the one row the
+ * coordinator owns and reads on every boot; ADR-018).
+ *
+ * Boot policy (ADR-018), the ONLY machinery that exists by design:
+ * - **absent** → treat as v1 and proceed. Pre-publish DBs, and any DB with no
+ *   manifests (hence no index row), legitimately carry no version.
+ * - **equal** → normal boot.
+ * - **higher than this build knows** → `console.warn` once and proceed anyway
+ *   (forward-tolerant; never crash a user's app on a version bump).
+ *
+ * There is NO migration machinery and NO dual-read — this is purely the
+ * future escape hatch. When a genuinely breaking format change ships, bump
+ * this and add the migration then.
+ */
+export const CDB_FORMAT_VERSION = 1;
+
 function manifestKey(scopeId: string): EntityKey {
   return `${MANIFEST_PREFIX}${scopeId}` as EntityKey;
 }
@@ -48,6 +67,12 @@ interface ManifestRow {
 
 interface ManifestIndexRow {
   v: 1;
+  /**
+   * Persisted-format version (ADR-018). Written on every index-row flush;
+   * optional on read so pre-versioned rows (and absent index rows) decode as
+   * "unversioned" → treated as v1.
+   */
+  formatVersion?: number;
   scopes: string[];
 }
 
@@ -60,7 +85,7 @@ export interface PersistenceOptions {
   /**
    * IndexedDB database name — convenience for the default engine.
    * Ignored when `engine` is provided (configure the engine directly).
-   * @default 'pcn_entities'
+   * @default 'cdb_entities'
    */
   dbName?: string;
   /** Debounce interval (ms) for batching writes. @default 100 */
@@ -206,7 +231,7 @@ export function enablePersistence(
   options: PersistenceOptions = {},
 ): PersistenceHandle {
   const {
-    dbName = "pcn_entities",
+    dbName = "cdb_entities",
     engine = idbEngine({ dbName }),
     writeDebounce = 100,
     onReady,
@@ -286,6 +311,7 @@ export function enablePersistence(
   let indexDirty = false;
   let indexSeeded = false;
   let gcTimer: ReturnType<typeof setTimeout> | null = null;
+  let formatVersionWarned = false; // ADR-018: warn-on-newer fires at most once
 
   // ── Environment guard (SSR etc.) ───────────
   if (!engine.isSupported()) {
@@ -445,7 +471,11 @@ export function enablePersistence(
     // lazy so pre-boot writes can never snapshot a half-seeded index
     // (review B1).
     if (indexDirty) {
-      const row: ManifestIndexRow = { v: 1, scopes: [...manifestScopes] };
+      const row: ManifestIndexRow = {
+        v: 1,
+        formatVersion: CDB_FORMAT_VERSION,
+        scopes: [...manifestScopes],
+      };
       dirtySaves.set(INDEX_KEY, row);
       indexDirty = false;
     }
@@ -475,7 +505,7 @@ export function enablePersistence(
       disabled = true;
       onError?.(err);
       if (process.env.NODE_ENV !== "production") {
-        console.warn("[pcn-persist] Write failed, persistence disabled:", err);
+        console.warn("[cdb-persist] Write failed, persistence disabled:", err);
       }
     } finally {
       flushing = false;
@@ -623,6 +653,27 @@ export function enablePersistence(
     dirtyDeletes.delete(INDEX_KEY);
   }
 
+  /**
+   * Inspect a booted index row's `formatVersion` (ADR-018). Absent → treat as
+   * v1, proceed silently. Equal → normal. Higher than this build knows →
+   * `console.warn` once and proceed (forward-tolerant; never crash). No
+   * migration is performed — this is purely the escape hatch.
+   */
+  function checkFormatVersion(row: ManifestIndexRow): void {
+    const fv = row.formatVersion;
+    if (fv === undefined) return; // pre-versioned / unversioned → v1
+    if (fv > CDB_FORMAT_VERSION && !formatVersionWarned) {
+      formatVersionWarned = true;
+      if (process.env.NODE_ENV !== "production") {
+        console.warn(
+          `[cdb-persist] Persisted format version ${fv} is newer than this build supports ` +
+            `(${CDB_FORMAT_VERSION}). Reading anyway — data written by the newer version may not ` +
+            `hydrate correctly. Upgrade colada-db.`,
+        );
+      }
+    }
+  }
+
   /** Seed the live index mirror from the persisted index (once, at boot). */
   function seedIndex(scopes: string[]): void {
     for (const s of scopes) {
@@ -690,8 +741,9 @@ export function enablePersistence(
           // Never calls loadAll; unreferenced rows stay durable-but-cold.
           const indexRows = await engine.loadMany([INDEX_KEY]);
           if (disposed) return;
-          const persisted =
-            indexRows.length > 0 ? (indexRows[0].data as ManifestIndexRow).scopes : [];
+          const indexRow = indexRows.length > 0 ? (indexRows[0].data as ManifestIndexRow) : null;
+          if (indexRow) checkFormatVersion(indexRow);
+          const persisted = indexRow ? indexRow.scopes : [];
           const bootScopes = persisted.filter((s) => !removedPreBoot.has(s));
           seedIndex(persisted);
 
@@ -726,7 +778,9 @@ export function enablePersistence(
             // this session's setManifest calls MERGE with prior sessions
             // instead of clobbering them (review B1).
             if (row.key === INDEX_KEY) {
-              seedIndex((row.data as ManifestIndexRow).scopes);
+              const indexRow = row.data as ManifestIndexRow;
+              checkFormatVersion(indexRow);
+              seedIndex(indexRow.scopes);
               continue;
             }
             if (row.key.startsWith(MANIFEST_PREFIX)) continue;
@@ -757,7 +811,7 @@ export function enablePersistence(
       disabled = true;
       onError?.(err);
       if (process.env.NODE_ENV !== "production") {
-        console.warn("[pcn-persist] Storage engine unavailable, running memory-only:", err);
+        console.warn("[cdb-persist] Storage engine unavailable, running memory-only:", err);
       }
     });
 
