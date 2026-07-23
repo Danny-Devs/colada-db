@@ -6,7 +6,44 @@
  * @module pinia-colada-plugin-normalizer
  */
 
-import type { ComputedRef, ShallowRef } from "@vue/reactivity";
+// ─────────────────────────────────────────────
+// The owned read type (ADR-019)
+// ─────────────────────────────────────────────
+
+/**
+ * The public type of every reactive read in colada-db: a value box you
+ * observe through `.value`.
+ *
+ * ```ts
+ * const contact = store.get("contact", "1"); // ColadaRef<Contact | undefined>
+ * contact.value?.name;
+ * ```
+ *
+ * `value` is `readonly` because the read API hands out a **view** of store
+ * state: writes go through `set` / `replace` / `update`. Assigning to
+ * `.value` would rewrite the projection WITHOUT emitting an event and
+ * desynchronize every consumer — the same read-only contract the
+ * subscription boundary's event payloads carry.
+ *
+ * Reactivity belongs to the engine, not to this type. colada-db's internal
+ * signal engine is Vue's standalone reactivity core (ADR-008 §3), so in a
+ * Vue-family runtime these boxes track and trigger exactly as native refs
+ * do — reading `.value` inside a `computed`/`watchEffect` subscribes, and a
+ * store write re-runs the effect. Consumers on other frameworks read
+ * `.value` from inside the subscription boundary (`createStoreBoundary`),
+ * which speaks plain callbacks and snapshots, rather than depending on
+ * tracking.
+ *
+ * colada-db **owns** this contract: the signal engine is an implementation
+ * detail we can evolve (ADR-019), so no framework type appears anywhere in
+ * these published declarations. The objects actually returned are the
+ * engine's own shallow/computed refs, which satisfy `ColadaRef`
+ * structurally — declaring the wider owned type widens the DECLARATION and
+ * changes nothing at runtime.
+ */
+export interface ColadaRef<T> {
+  readonly value: T;
+}
 
 // ─────────────────────────────────────────────
 // Entity Store Interface (the swappable contract)
@@ -44,7 +81,7 @@ export type EntityKey = `${string}:${string}`;
  * }
  *
  * // Now fully typed:
- * entityStore.get('contact', '1')          // ShallowRef<Contact | undefined>
+ * entityStore.get('contact', '1')          // ColadaRef<Contact | undefined>
  * entityStore.set('contact', '1', data)    // data must match Contact
  * useEntityQuery('contact', c => c.name)   // c is Contact
  * onEntityAdded('contact', e => e.data)    // data is Contact | undefined
@@ -245,22 +282,26 @@ export interface EntityStore {
 
   /**
    * Get a single entity by type and ID.
-   * Returns a reactive ref that updates when the entity changes.
+   * Returns a reactive {@link ColadaRef} that updates when the entity changes.
+   *
+   * A miss creates a phantom ref that populates if the entity arrives later
+   * ("subscribe before data arrives"); `gc()` sweeps phantoms nothing tracks.
    */
   get<K extends string & keyof EntityRegistry>(
     entityType: K,
     id: string,
-  ): ShallowRef<EntityRegistry[K] | undefined>;
-  get(entityType: string, id: string): ShallowRef<EntityRecord | undefined>;
+  ): ColadaRef<EntityRegistry[K] | undefined>;
+  get(entityType: string, id: string): ColadaRef<EntityRecord | undefined>;
 
   /**
    * Get all entities of a given type.
-   * Returns a computed ref that updates when any entity of that type changes.
+   * Returns a derived {@link ColadaRef} that updates when any entity of that
+   * type changes. Memoized — one per entity type.
    */
   getByType<K extends string & keyof EntityRegistry>(
     entityType: K,
-  ): ComputedRef<EntityRegistry[K][]>;
-  getByType(entityType: string): ComputedRef<EntityRecord[]>;
+  ): ColadaRef<EntityRegistry[K][]>;
+  getByType(entityType: string): ColadaRef<EntityRecord[]>;
 
   /**
    * Get all entities of a given type as id+data pairs.
