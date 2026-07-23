@@ -1,7 +1,15 @@
-# ADR-019: Ref Identity Is a VERSIONED Global Registry Key, and Encode Validates What Decode Validates
+# ADR-020: Ref Identity Is a VERSIONED Global Registry Key, and Encode Validates What Decode Validates
 
 **Status:** Accepted
 **Date:** 2026-07-23
+
+> **Numbering note.** Drafted as ADR-019 on the DAN-649 branch. DAN-656 landed
+> its own ADR-019 (`019-colada-owns-its-public-read-type.md`) on `main` while
+> this branch was in review — two branches reserved the same number, git saw no
+> conflict because the filenames differed, and the collision surfaced only on
+> inspection of the merge. Renumbered to 020 here, since the landed ADR owns 019
+> and ADR numbers are never reused. If you are cutting an ADR on a branch, take
+> the next number at MERGE time, not at draft time.
 
 ## Context
 

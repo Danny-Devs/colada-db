@@ -44,7 +44,7 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && node scripts/check-public-types.mjs",
     "fmt": "oxfmt",
     "play": "vite playground",
     "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test && pnpm lint",

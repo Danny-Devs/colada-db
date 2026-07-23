@@ -213,6 +213,35 @@ the regression's absence-assertions structurally (exact key set, snapshot shape)
 rather than `not.toHaveProperty("<old>")` — otherwise the test that proves you
 did the rename is what fails the gate that checks the rename.
 
+## [2026-07-23] — `grep -c` as a pass/fail gate inverts its exit code exactly when it passes
+
+**Mistake:** DAN-656's DoD assertion is `grep -c "@vue/reactivity"
+dist/index.d.mts   # must be 0`. It works — but "0 matches" is `grep`'s
+*failure* exit (1). Chained after the other gates with `&&`, the whole DoD
+command aborts at the very moment the ticket succeeds, and the run reads as a
+red build. The inverse trap is worse: `grep -c … && echo PASS` reports PASS only
+when the leak IS present.
+
+**Why it happened:** `grep -c` prints a count to stdout but still exits on
+match/no-match semantics, so the human-readable output (`0`) and the shell's
+verdict (failure) disagree. A gate whose success condition is "no output" has to
+either be negated (`! grep -q …`) or be a script that owns its own exit code.
+
+**Fix:** encoded a rung up the ladder — `scripts/check-public-types.mjs`, wired
+into `pnpm build`, reads the emitted declarations, prints a specific diagnostic
+with file:line on a leak, and exits 1 **only** on violation. `pnpm -r build` now
+carries the assertion, so it composes correctly with every other gate and can't
+be forgotten. It also covers what the one-liner can't: leaks arriving through a
+*different* barrel-exported type, in a file nobody edited. Verified by executed
+negative control in both directions (fires on a reintroduced leak, silent when
+clean).
+
+**For future agents:** never put a bare `grep`/`grep -c` in a `&&`-chained DoD
+command as an *absence* assertion. Use `! grep -q "<token>" <file>` if it must
+stay a one-liner, and promote it to a script wired into `build`/`test` the
+moment the artifact it checks is a publish surface — the exit code is then
+yours, and so is the error message.
+
 ## [2026-07-22] — a Symbol in-memory marker with a plain-string wire key reopens the collision the Symbol closed
 
 **Mistake:** `EntityRef` uses a `Symbol` marker specifically to avoid colliding

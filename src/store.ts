@@ -12,7 +12,14 @@
 
 import { computed, shallowRef, triggerRef } from "@vue/reactivity";
 import type { ComputedRef, ShallowRef } from "@vue/reactivity";
-import type { EntityEvent, EntityKey, EntityRecord, EntityRef, EntityStore } from "./types";
+import type {
+  EntityEvent,
+  EntityKey,
+  EntityRecord,
+  EntityRef,
+  EntityRegistry,
+  EntityStore,
+} from "./types";
 import { ENTITY_REF_MARKER } from "./types";
 
 /**
@@ -159,6 +166,40 @@ export function decodeEntityRefs(data: unknown): unknown {
 }
 
 type EntityListener = (event: EntityEvent) => void;
+
+/**
+ * The ref-backed view of the store — the same object `createEntityStore`
+ * returns, seen through its concrete `@vue/reactivity` types instead of the
+ * public {@link EntityStore} contract (whose reads are the owned
+ * {@link ColadaRef}, ADR-019).
+ *
+ * This exists to keep the Vue adapter's privileged fast path (ADR-008 §3 —
+ * sharing the store's ACTUAL refs rather than going through the subscription
+ * boundary) from being narrowed away by accident: the implementation object
+ * is annotated with this type, so if `get()`/`getByType()` ever stopped
+ * handing out real `ShallowRef`/`ComputedRef` instances, THIS file stops
+ * compiling. `ColadaRef` widens the declared type; it must never change the
+ * returned value.
+ *
+ * Deliberately NOT barrel-exported: re-exporting it would put
+ * `@vue/reactivity` back on line 1 of the published `.d.mts`, which is the
+ * exact leak ADR-019 closes. A framework adapter that wants these types back
+ * re-narrows at its own boundary, where the Vue dependency is honest.
+ *
+ * @internal
+ */
+interface RefBackedEntityStore extends EntityStore {
+  get<K extends string & keyof EntityRegistry>(
+    entityType: K,
+    id: string,
+  ): ShallowRef<EntityRegistry[K] | undefined>;
+  get(entityType: string, id: string): ShallowRef<EntityRecord | undefined>;
+
+  getByType<K extends string & keyof EntityRegistry>(
+    entityType: K,
+  ): ComputedRef<EntityRegistry[K][]>;
+  getByType(entityType: string): ComputedRef<EntityRecord[]>;
+}
 
 /**
  * Creates an in-memory EntityStore backed by Vue reactive primitives.
@@ -316,7 +357,10 @@ export function createEntityStore(): EntityStore {
 
   // ── EntityStore implementation ──────────────
 
-  const store: EntityStore = {
+  // Annotated with the ref-backed (not the public) type: this is the
+  // compile-time pin that `get()`/`getByType()` still hand out the ACTUAL
+  // refs the Vue fast path shares. Widened back to `EntityStore` on return.
+  const store: RefBackedEntityStore = {
     set(entityType: string, id: string, data: EntityRecord) {
       const typeMap = getTypeMap(entityType);
       const existing = typeMap.get(id);

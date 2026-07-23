@@ -104,6 +104,7 @@ export type { RelayPageInfo } from "./pagination";
 // ─── Entity definitions & types ───
 export { defineEntity, ENTITY_REF_MARKER } from "./types";
 export type {
+  ColadaRef,
   EntityRecord,
   EntityKey,
   EntityRegistry,
