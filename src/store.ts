@@ -24,9 +24,45 @@ import { ENTITY_REF_MARKER } from "./types";
 const ENTITY_REF_JSON_KEY = "__pcn_ref";
 
 /**
+ * Assign an OWN enumerable data property, safely, even when `key` collides
+ * with an accessor on `Object.prototype`.
+ *
+ * `result[key] = value` invokes the setter when `key === "__proto__"` — on a
+ * plain `{}` that reassigns the object's PROTOTYPE instead of creating an own
+ * property, so the field is silently dropped and (if `value` is an object) the
+ * rebuilt object starts inheriting from it (prototype-pollution-adjacent). We
+ * only walk this rebuild path when a sibling EntityRef forced reconstruction,
+ * so persisted data carrying an own `__proto__` key (JSON.parse produces such
+ * keys) would corrupt on encode/decode. `defineProperty` bypasses the setter
+ * and writes a real own enumerable property, leaving the prototype intact.
+ *
+ * `constructor`/`prototype` need no special handling: they are DATA properties
+ * on `Object.prototype`, so plain assignment already shadows them as own props
+ * without side effects. `__proto__` is the sole accessor, hence the sole hazard.
+ * @internal
+ */
+function assignOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === "__proto__") {
+    Object.defineProperty(target, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  } else {
+    target[key] = value;
+  }
+}
+
+/**
  * Walk data and replace EntityRef objects (Symbol-marked) with a JSON-safe
  * wire format. Used by toJSON() and persistence adapters.
  * Symbols don't survive JSON.stringify or IndexedDB structured clone.
+ *
+ * Note (M3, DAN-648): `undefined`-valued fields pass through unchanged — this
+ * is a pure ref transform, not a JSON filter. The engines then diverge on them
+ * (structured-clone keeps `undefined`, JSON.stringify drops it); that envelope
+ * is documented on the `StorageEngine` contract in `types.ts`.
  * @internal
  */
 export function encodeEntityRefs(data: unknown): unknown {
@@ -52,7 +88,7 @@ export function encodeEntityRefs(data: unknown): unknown {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
     const encoded = encodeEntityRefs(value);
-    result[key] = encoded;
+    assignOwn(result, key, encoded);
     if (encoded !== value) changed = true;
   }
   return changed ? result : data;
@@ -71,12 +107,24 @@ export function decodeEntityRefs(data: unknown): unknown {
   }
 
   const record = data as Record<string, unknown>;
-  if (record[ENTITY_REF_JSON_KEY] === true && "entityType" in record && "key" in record) {
+  // Treat as a ref ONLY when the FULL ref shape is present with the right types
+  // (M2, DAN-648). The wire marker is a plain string key, so ordinary persisted
+  // data can collide with it; validating entityType/id/key as strings rejects
+  // malformed collisions (missing id, wrong types) and lets them pass through as
+  // plain data instead of hydrating a broken / dangling ref. A collision whose
+  // shape AND types exactly match a real ref remains indistinguishable — that is
+  // an inherent limit of a string-keyed wire marker, bounded honestly here.
+  if (
+    record[ENTITY_REF_JSON_KEY] === true &&
+    typeof record.entityType === "string" &&
+    typeof record.id === "string" &&
+    typeof record.key === "string"
+  ) {
     // Restore Symbol-marked EntityRef from wire format
     const ref: EntityRef = {
       [ENTITY_REF_MARKER]: true,
-      entityType: record.entityType as string,
-      id: record.id as string,
+      entityType: record.entityType,
+      id: record.id,
       key: record.key as EntityKey,
     };
     return ref;
@@ -87,7 +135,7 @@ export function decodeEntityRefs(data: unknown): unknown {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
     const decoded = decodeEntityRefs(value);
-    result[key] = decoded;
+    assignOwn(result, key, decoded);
     if (decoded !== value) changed = true;
   }
   return changed ? result : data;
