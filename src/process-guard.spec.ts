@@ -26,9 +26,11 @@
  * semantic test could ever reach: `process.env?.NODE_ENV` and
  * `process.env && process.env.NODE_ENV` behave IDENTICALLY at runtime, so every
  * evaluation assertion below passes against both. They differ only in what a
- * bundler can do with them. `@rollup/plugin-replace` — and Vite's production
- * `define`, and webpack's `DefinePlugin` — substitute the LITERAL member
- * expression `process.env.NODE_ENV`; put a `?.` between `env` and `NODE_ENV`
+ * bundler can do with them. `@rollup/plugin-replace` substitutes the LITERAL
+ * member expression `process.env.NODE_ENV` (AST-aware definers — esbuild, Vite
+ * 8, webpack 5 — were measured coping with the `?.` form; the literal
+ * substituters are the ones that break, so write to the strictest, not the
+ * smartest); put a `?.` between `env` and `NODE_ENV`
  * and there is no literal left to find, so the comparison never folds, the
  * branch never dies, and the dev-warning string ships. The measured cost on the
  * canonical Rollup production chain: +1,106 bytes minified / +400 gzipped, all
@@ -204,9 +206,13 @@ describe("A1: process guards survive a runtime with no `process` (DAN-649)", () 
  * because at runtime it behaves exactly like `process.env && process.env.NODE_ENV`.
  * What it does NOT do is survive contact with a bundler.
  *
- * Every `define` / `replace` toolchain — `@rollup/plugin-replace`, esbuild
- * `define`, webpack `DefinePlugin`, Vite — performs LITERAL substitution on the
- * member expression `process.env.NODE_ENV`. Put a `?.` between `env` and
+ * LITERAL-substitution toolchains — `@rollup/plugin-replace` is the canonical
+ * one, and the only one measured leaking here — replace the exact member
+ * expression `process.env.NODE_ENV` as text. (esbuild, Vite 8 and webpack 5
+ * were built and grepped during review and stripped correctly: their `define`
+ * is AST-aware. The pin below targets the strictest definer, not the smartest,
+ * because we do not control which one a consumer uses.)
+ * Put a `?.` between `env` and
  * `NODE_ENV` and the literal is gone: nothing gets replaced, the comparison
  * never folds to a constant, dead-code elimination cannot remove the branch,
  * and every internal dev-warning string ships to production. Measured on the

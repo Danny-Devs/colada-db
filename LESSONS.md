@@ -10,14 +10,27 @@ LESSONS entry (the entry then explains *why* the stronger encoding exists).
 `typeof process !== "undefined" && process.env?.NODE_ENV !== "production"`. It is
 safe. It never throws. It returns exactly the right boolean in every runtime. All
 30 tests written to police it passed — and it silently broke dead-code
-elimination in every downstream production bundle. `@rollup/plugin-replace` (and
-Vite's production `define`, and webpack's `DefinePlugin`) substitute the
-**literal** member expression `process.env.NODE_ENV`; a `?.` between `env` and
-`NODE_ENV` leaves no literal to find. Measured on the canonical Rollup chain:
-the branch stopped folding, +1,106 bytes minified / +400 gzipped, and all five
-internal dev-warning strings leaked into consumers' production bundles. The
-shipped `dist/index.mjs` contained `process.env?.NODE_ENV` 5× and
-`process.env.NODE_ENV` **0×** — a literal definer had nothing to replace.
+elimination for *literal-substitution* definers. `@rollup/plugin-replace`
+substitutes the **literal** member expression `process.env.NODE_ENV`; a `?.`
+between `env` and `NODE_ENV` leaves no literal to find. Measured on the
+canonical Rollup chain: the branch stopped folding, +1,106 bytes minified /
++400 gzipped, and all five internal dev-warning strings leaked into consumers'
+production bundles. The shipped `dist/index.mjs` contained
+`process.env?.NODE_ENV` 5× and `process.env.NODE_ENV` **0×** — a literal
+definer had nothing to replace.
+
+**Measured blast radius — record it honestly, it is narrower than it first
+looked.** Five real production toolchains were built and grepped during the
+review, not reasoned about: `@rollup/plugin-replace` + terser **leaked** the
+warning strings; esbuild, Vite 8 app-mode, webpack 5 `mode:"production"`, and
+Terser `global_defs` all **stripped correctly**, because their `define` is
+AST-aware and folds the `?.` form. So most consumers — including this library's
+Vite-first audience — were never affected. Do not restate this as "every
+bundler"; the specific claim that survives measurement is *literal/regex
+substituters break, AST-aware definers cope*. (An earlier draft of this entry
+also named Vite and webpack as victims. They were measured clean. Corrected
+here rather than left to mislead a future agent — an unverified victim list in
+a knowledge base is worse than no list, because it gets trusted.)
 
 **Why it happened:** every test we had was a SEMANTIC test — evaluate the
 expression, assert the value. `process.env?.NODE_ENV` and

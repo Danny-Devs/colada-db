@@ -12,7 +12,9 @@
  * nor in any runtime without a bundler shim. (Deno is NOT affected — it exposes
  * `process` through Node compatibility; verified 2026-07-23.) Bundler users never see the
  * problem: Vite/webpack/esbuild statically replace `process.env.NODE_ENV` at
- * build time, so the identifier is gone before the code ever runs. That is
+ * build time (when the guard is written in the strippable literal form — see
+ * the `?.` warning below), so the identifier is gone before the code ever
+ * runs. That is
  * exactly what makes this class of bug so easy to reintroduce — it is
  * invisible to the entire toolchain the library is developed with.
  *
@@ -37,9 +39,11 @@
  *
  * **Do NOT write `process.env?.NODE_ENV`.** Optional chaining looks like the
  * tidier way to spell the same tolerance, but it silently defeats dead-code
- * elimination. `@rollup/plugin-replace` — and Vite's production `define`, and
- * webpack's `DefinePlugin` — perform LITERAL substitution on the exact member
- * expression `process.env.NODE_ENV`. Insert a `?.` and there is no longer any
+ * elimination. `@rollup/plugin-replace` performs LITERAL substitution on the
+ * exact member expression `process.env.NODE_ENV` (AST-aware definers — esbuild,
+ * Vite 8, webpack 5 — were measured folding the `?.` form fine; the literal
+ * substituters break, and we do not control which definer a consumer uses).
+ * Insert a `?.` and there is no longer any
  * literal for the definer to find, so the branch never folds to `false`, the
  * dev-only warning strings survive into every downstream production bundle,
  * and constant-folded reads become live runtime reads. Measured on the
