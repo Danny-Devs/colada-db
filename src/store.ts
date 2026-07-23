@@ -80,7 +80,24 @@ export function encodeEntityRefs(data: unknown): unknown {
   }
 
   const record = data as Record<string | symbol, unknown>;
-  if (record[ENTITY_REF_MARKER] === true) {
+  // Treat as a ref ONLY when the marker is accompanied by the FULL ref shape
+  // with the right types — the same validation the DECODE path performs (M2,
+  // DAN-648). Encode and decode must distrust the same things: before
+  // ENTITY_REF_MARKER became a `Symbol.for` registry key (DAN-649/FIX 8), a
+  // per-instance symbol made a foreign-shaped ref structurally unable to reach
+  // this branch, so the asymmetry was latent. A global registry interns across
+  // copies AND versions, so a ref minted elsewhere now satisfies the marker
+  // check. Without this guard such a ref is destructively rewritten into a
+  // malformed `__cdb_ref` row that decode's own M2 guard then permanently
+  // refuses — an unrecoverable relationship where the pre-change behaviour was
+  // a clean round-trip. Non-conforming marked objects fall through to the
+  // ordinary child walk and survive as plain data.
+  if (
+    record[ENTITY_REF_MARKER] === true &&
+    typeof record.entityType === "string" &&
+    typeof record.id === "string" &&
+    typeof record.key === "string"
+  ) {
     // Replace Symbol-marked EntityRef with string-keyed wire format
     return {
       [ENTITY_REF_JSON_KEY]: true,

@@ -5,7 +5,7 @@
  * carrying the full data. Instead of one fetch per event, coalesce
  * them into a single batch fetch.
  *
- * Extracted from pinia-colada-plugin-normalizer's composables.ts
+ * Extracted from the Pinia Colada normalizer plugin's composables.ts
  * (chip 2.5, 2026-07-19); logic unchanged.
  *
  * @example

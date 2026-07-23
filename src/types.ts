@@ -1,9 +1,10 @@
 /**
- * pinia-colada-plugin-normalizer
+ * colada-db
  *
- * Normalized entity caching plugin for Pinia Colada.
+ * AI-first, local-first client database — a normalized reactive entity store
+ * with pluggable durability engines (IndexedDB, OPFS SQLite).
  *
- * @module pinia-colada-plugin-normalizer
+ * @module colada-db
  */
 
 // ─────────────────────────────────────────────
@@ -59,6 +60,31 @@ export type EntityRecord = Record<string, unknown>;
  * Composite key that uniquely identifies an entity: type + id.
  *
  * @example 'contact:42', 'order:abc-123'
+ *
+ * ## Known sharp edge (DAN-649/A6 — deliberately deferred, not overlooked)
+ *
+ * This is a template-literal type, not a nominal brand, so it accepts ANY
+ * string containing at least one colon — including a bare `"a:b"` that never
+ * came from an entity. More consequentially, every reader splits on the FIRST
+ * colon (`key.indexOf(":")`, 8 sites across `store.ts`, `persist.ts`,
+ * `normalize.ts`), so an entity TYPE that itself contains a colon round-trips
+ * incorrectly: `"my:type"` + id `"1"` encodes to `"my:type:1"` and decodes back
+ * as type `"my"`, id `"type:1"`.
+ *
+ * A true brand plus a `toEntityKey()` constructor would make the sharp edge
+ * unrepresentable — the decoder half already exists as the exported
+ * `splitEntityKey()`, which is where the first-colon rule is implemented. The
+ * brand was measured and deferred rather than attempted here, because
+ * `EntityKey` is load-bearing in the {@link StorageEngine} PORT CONTRACT
+ * (`loadAll`, `loadMany`, `writeBatch`): branding it is a breaking change for
+ * every third-party engine implementation (ADR-006 / ADR-008 §2), so it needs
+ * its own ADR and its own review — the same reasoning that split the
+ * ColadaRef read-type change out to DAN-656. It also crosses two surfaces
+ * this ticket was scoped away from (`engines/` protocol internals and
+ * `transactions.ts`).
+ *
+ * Until then the contract is by convention: entity type names MUST NOT contain
+ * a colon.
  */
 export type EntityKey = `${string}:${string}`;
 
@@ -618,9 +644,45 @@ export function defineEntity<T extends EntityRecord = EntityRecord>(
 /**
  * Symbol used to mark objects as entity references.
  * Using a Symbol prevents collision with any API data.
- * @internal
+ *
+ * Registered via `Symbol.for` (the cross-realm global symbol registry) rather
+ * than `Symbol()`, so that two copies of colada-db loaded in one page agree on
+ * ref identity. With a plain `Symbol()` the marker is per-module-instance:
+ * `isEntityRef` in copy A returns `false` for a ref minted by copy B, and refs
+ * silently degrade to opaque data. The case this actually closes is **two
+ * `colada-db` copies deduped apart by npm** — a version skew (an app on one
+ * range, a dependency on another) that chip 3 makes possible the moment the
+ * Pinia Colada adapter swaps its frozen engine copy for a `colada-db`
+ * dependency. It does NOT close the pre-chip-3 frozen copy: that copy declares
+ * its own `Symbol("pinia-colada-entity-ref")` — a plain symbol with a different
+ * description — which `Symbol.for` cannot intern with. Closing that case would
+ * require the plugin copy to adopt this same registry key.
+ *
+ * ## Versioning rule (ADR-020)
+ *
+ * The registry key carries an explicit `@1` suffix. A global registry interns
+ * across VERSIONS as well as across instances, so without a version suffix a
+ * page holding v1 and v2 would have v1's `isEntityRef` accept a v2 ref — and
+ * the v1 encode path would then rewrite it using v1's field expectations. The
+ * plain `Symbol()` this replaced degraded such cross-version refs safely to
+ * opaque data; the suffix restores that fail-safe while keeping 100% of the
+ * duplicate-instance benefit within a major.
+ *
+ * **Bump the suffix on any breaking change to the ref SHAPE** (adding,
+ * removing, renaming, or retyping `entityType` / `id` / `key`). Do not bump it
+ * for unrelated majors — the suffix versions the ref contract, not the package.
+ *
+ * Scope note: the symbol VALUE is never serialized — the wire/disk format uses
+ * the string key `__cdb_ref` (ADR-018), whose shape+type validation was
+ * hardened separately in DAN-648. But symbol IDENTITY is the branch condition
+ * in `encodeEntityRefs`, so it does gate what gets written. For a single
+ * instance the emitted bytes are unchanged (verified byte-identical), so no
+ * migration is required.
+ *
+ * @remarks Exported from the package barrel. Its formal public-vs-internal
+ * classification is settled by DAN-656, which owns the ref read-type surface.
  */
-export const ENTITY_REF_MARKER = Symbol("pinia-colada-entity-ref");
+export const ENTITY_REF_MARKER = Symbol.for("colada-db/entity-ref@1");
 
 /**
  * An entity reference that replaces the actual entity data in the query cache.

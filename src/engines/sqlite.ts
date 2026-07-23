@@ -3,9 +3,8 @@
  *
  * SQLite-WASM with OPFS runs in a Worker (synchronous OPFS access handles
  * are worker-only), so this engine is a thin RPC client: it owns a Worker
- * running `runSqliteWorker()` (exported from
- * `pinia-colada-plugin-normalizer/sqlite-worker`) and speaks a four-op
- * protocol: open / loadAll / writeBatch / close.
+ * running `runSqliteWorker()` (exported from `colada-db/sqlite-worker`) and
+ * speaks a four-op protocol: open / loadAll / writeBatch / close.
  *
  * Bring-your-own-worker: the APP creates the worker file so the app's
  * bundler resolves `@sqlite.org/sqlite-wasm` and its .wasm asset — the one
@@ -13,7 +12,7 @@
  *
  * ```typescript
  * // app/sqlite.worker.ts
- * import { runSqliteWorker } from 'pinia-colada-plugin-normalizer/sqlite-worker'
+ * import { runSqliteWorker } from 'colada-db/sqlite-worker'
  * runSqliteWorker()
  * ```
  * ```typescript
@@ -105,7 +104,12 @@ export function sqliteEngine(options: SqliteEngineOptions): SqliteEngine {
       attach(typeof workerOrFactory === "function" ? workerOrFactory() : workerOrFactory);
       const info = await call<{ persistent: boolean }>("open", { dbName });
       persistent = info.persistent;
-      if (!info.persistent && process.env.NODE_ENV !== "production") {
+      if (
+        !info.persistent &&
+        typeof process !== "undefined" &&
+        process.env &&
+        process.env.NODE_ENV !== "production"
+      ) {
         console.warn(
           "[cdb-persist] OPFS unavailable — SQLite engine running in-memory (no durability). " +
             "OPFS requires a secure context (https/localhost) and a browser with " +

@@ -5,8 +5,8 @@
  * denormalize(): walk data, resolve EntityRefs back to live store entities
  *                with structural sharing and circular-ref protection.
  *
- * Extracted from pinia-colada-plugin-normalizer's plugin.ts (chip 2, 2026-07-19);
- * bodies unchanged.
+ * Extracted from the Pinia Colada normalizer plugin's plugin.ts (chip 2,
+ * 2026-07-19); bodies unchanged.
  */
 import type {
   EntityRecord,
@@ -303,6 +303,19 @@ function walkAndDenormalize(
   return changed ? result : data;
 }
 
+/**
+ * A marked object is a ref only when it also carries the FULL ref shape with
+ * the right types — the same validation `decodeEntityRefs` performs (M2,
+ * DAN-648) and `encodeEntityRefs` now mirrors (DAN-649/FIX 9). `ENTITY_REF_MARKER`
+ * is a `Symbol.for` registry key, so it interns across duplicate copies AND
+ * across versions of colada-db; a foreign-shaped object carrying the marker
+ * must degrade to plain data rather than be dereferenced as a dangling ref.
+ */
 function isEntityRef(obj: Record<string | symbol, unknown>): boolean {
-  return obj[ENTITY_REF_MARKER] === true;
+  return (
+    obj[ENTITY_REF_MARKER] === true &&
+    typeof obj.entityType === "string" &&
+    typeof obj.id === "string" &&
+    typeof obj.key === "string"
+  );
 }
