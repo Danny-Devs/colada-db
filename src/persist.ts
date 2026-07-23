@@ -504,7 +504,7 @@ export function enablePersistence(
     } catch (err) {
       disabled = true;
       onError?.(err);
-      if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
+      if (typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production") {
         console.warn("[cdb-persist] Write failed, persistence disabled:", err);
       }
     } finally {
@@ -664,7 +664,7 @@ export function enablePersistence(
     if (fv === undefined) return; // pre-versioned / unversioned → v1
     if (fv > CDB_FORMAT_VERSION && !formatVersionWarned) {
       formatVersionWarned = true;
-      if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
+      if (typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production") {
         console.warn(
           `[cdb-persist] Persisted format version ${fv} is newer than this build supports ` +
             `(${CDB_FORMAT_VERSION}). Reading anyway — data written by the newer version may not ` +
@@ -810,7 +810,7 @@ export function enablePersistence(
       booting = false;
       disabled = true;
       onError?.(err);
-      if (typeof process !== "undefined" && process.env?.NODE_ENV !== "production") {
+      if (typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production") {
         console.warn("[cdb-persist] Storage engine unavailable, running memory-only:", err);
       }
     });

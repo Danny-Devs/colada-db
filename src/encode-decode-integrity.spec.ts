@@ -17,7 +17,8 @@
  *      JSON (SQLite). Pinned here as the documented divergence envelope.
  */
 import { describe, expect, it } from "vitest";
-import { encodeEntityRefs, decodeEntityRefs } from "./store";
+import { createEntityStore, encodeEntityRefs, decodeEntityRefs } from "./store";
+import { denormalize } from "./normalize";
 import { ENTITY_REF_MARKER } from "./types";
 import type { EntityRef } from "./types";
 
@@ -178,5 +179,144 @@ describe("DAN-648 M3 — undefined-field serialization divergence (pinned)", () 
     // The engine-serialization divergence this documents:
     expect(JSON.parse(JSON.stringify(encoded))).not.toHaveProperty("b"); // SQLite/JSON drops
     expect(structuredClone(encoded)).toHaveProperty("b"); // IDB/structured-clone keeps
+  });
+});
+
+/**
+ * DAN-649 (gauntlet FIX 8 / FIX 9) — the ref-identity contract.
+ *
+ * `ENTITY_REF_MARKER` moved from a per-instance `Symbol()` to a GLOBAL registry
+ * key, `Symbol.for("colada-db/entity-ref@1")`, so two copies of colada-db on one
+ * page agree on ref identity. That fixed a real defect and introduced a new
+ * coupling: a global registry interns across VERSIONS as well as across
+ * instances.
+ *
+ * Two consequences are pinned here.
+ *
+ * FIX 8 — the key is VERSIONED. Without the `@1` suffix, a page holding v1 and
+ * v2 would have v1's `isEntityRef` accept a v2 ref. The plain `Symbol()` this
+ * replaced degraded such cross-version refs safely to opaque data; the suffix
+ * restores that fail-safe. Bump it on any breaking change to the ref SHAPE.
+ *
+ * FIX 9 — encode and decode must distrust the SAME things. Decode has validated
+ * the full ref shape since DAN-648/M2; encode and `isEntityRef` checked only the
+ * marker. While the marker was per-instance that asymmetry was latent: a
+ * foreign-shaped ref could not carry a matching symbol, so it never reached the
+ * encode branch. Under a global registry it can — and an unvalidated encode
+ * would destructively rewrite it into a malformed `__cdb_ref` row that decode's
+ * own M2 guard then permanently refuses, turning a clean round-trip into an
+ * unrecoverable relationship.
+ *
+ * Severity, honestly: the destructive path needs two colada-db copies with
+ * DIFFERENT ref shapes on one page, i.e. a future major. The package is 0.1.0,
+ * private, with zero users on disk. This closes a future hazard while it is
+ * free — it is not a live bug.
+ */
+describe("DAN-649 FIX 8 — the ref marker is a VERSIONED global registry key", () => {
+  it("is the interned symbol for `colada-db/entity-ref@1`", () => {
+    expect(ENTITY_REF_MARKER).toBe(Symbol.for("colada-db/entity-ref@1"));
+    expect(Symbol.keyFor(ENTITY_REF_MARKER)).toBe("colada-db/entity-ref@1");
+  });
+
+  it("a duplicate copy of the SAME major agrees on ref identity (the benefit kept)", () => {
+    // What another copy of this same version would mint, independently.
+    const fromAnotherCopy = {
+      [Symbol.for("colada-db/entity-ref@1")]: true,
+      entityType: "contact",
+      id: "42",
+      key: "contact:42",
+    };
+    const encoded = encodeEntityRefs(fromAnotherCopy) as Record<string, unknown>;
+    expect(encoded).toEqual(wireRef("contact", "42"));
+  });
+
+  it("a FUTURE major's marker does not intern with this one (the fail-safe restored)", () => {
+    const fromNextMajor = {
+      [Symbol.for("colada-db/entity-ref@2")]: true,
+      entityType: "contact",
+      id: "42",
+    };
+    expect(Symbol.for("colada-db/entity-ref@2")).not.toBe(ENTITY_REF_MARKER);
+    // Opaque data, walked as an ordinary object — never mistaken for a v1 ref.
+    const encoded = encodeEntityRefs(fromNextMajor) as Record<string, unknown>;
+    expect(encoded.__cdb_ref).toBeUndefined();
+    expect(encoded.entityType).toBe("contact");
+  });
+
+  it("emitted bytes for a legitimate ref are unchanged by the rename (no migration)", () => {
+    // The symbol VALUE is never serialized; it only gates the encode branch.
+    // Single-instance disk content must therefore be byte-identical.
+    expect(JSON.stringify(encodeEntityRefs(memRef("contact", "42")))).toBe(
+      '{"__cdb_ref":true,"entityType":"contact","id":"42","key":"contact:42"}',
+    );
+  });
+});
+
+describe("DAN-649 FIX 9 — encode distrusts exactly what decode distrusts", () => {
+  it("a marked object with a FOREIGN shape passes through as plain data, not a ref", () => {
+    // A ref minted by another copy whose shape this build does not recognise —
+    // no `id`, and `key` is structured rather than a string.
+    const foreign = {
+      [ENTITY_REF_MARKER]: true,
+      entityType: "contact",
+      key: { type: "contact", id: "42" },
+    };
+
+    const encoded = encodeEntityRefs(foreign) as Record<string, unknown>;
+
+    // NOT rewritten into a malformed `__cdb_ref` row.
+    expect(encoded.__cdb_ref).toBeUndefined();
+    // The payload survives intact and still round-trips.
+    expect(encoded.entityType).toBe("contact");
+    expect(encoded.key).toEqual({ type: "contact", id: "42" });
+    expect(decodeEntityRefs(JSON.parse(JSON.stringify(encoded)))).toEqual({
+      entityType: "contact",
+      key: { type: "contact", id: "42" },
+    });
+  });
+
+  it("pre-FIX-9 the same input produced a row decode's own M2 guard refuses", () => {
+    // The unrecoverable state this closes, constructed explicitly: what the
+    // unvalidated encode branch would have emitted for the object above.
+    const wouldHaveBeenWritten = {
+      __cdb_ref: true,
+      entityType: "contact",
+      id: undefined,
+      key: { type: "contact", id: "42" },
+    };
+    const decoded = decodeEntityRefs(wouldHaveBeenWritten) as Record<string | symbol, unknown>;
+    // Decode (correctly) refuses it — so the relationship is gone for good.
+    expect(decoded[ENTITY_REF_MARKER]).toBeUndefined();
+  });
+
+  it("a marked object nested inside a payload also survives as plain data", () => {
+    const input = {
+      id: "z",
+      good: memRef("contact", "42"),
+      foreign: { [ENTITY_REF_MARKER]: true, entityType: 7, id: "x", key: "7:x" },
+    };
+    const encoded = encodeEntityRefs(input) as Record<string, Record<string, unknown>>;
+    expect(encoded.good).toEqual(wireRef("contact", "42"));
+    expect(encoded.foreign.__cdb_ref).toBeUndefined();
+    expect(encoded.foreign.entityType).toBe(7);
+  });
+
+  it("legitimate refs are entirely unaffected (non-destructive)", () => {
+    const ref = memRef("order", "7");
+    expect(encodeEntityRefs(ref)).toEqual(wireRef("order", "7"));
+    expect(decodeEntityRefs(encodeEntityRefs(ref))).toEqual(ref);
+  });
+
+  it("denormalize leaves a foreign-shaped marked object alone instead of erasing it", () => {
+    // `isEntityRef` gates the DEREFERENCE. Before FIX 9 a marked object with a
+    // non-string `entityType` took the ref branch, missed the store lookup, and
+    // was replaced with `undefined` — silent data loss on the read path.
+    const store = createEntityStore();
+    const foreign = { [ENTITY_REF_MARKER]: true, entityType: 7, id: "x", key: "7:x" };
+    const result = denormalize({ payload: foreign }, store) as Record<string, unknown>;
+    // Structural sharing: nothing changed, so the payload comes back identical
+    // — the whole point. Pre-FIX-9 it came back as `undefined`.
+    expect(result.payload).toBe(foreign);
+    expect(result.payload).not.toBeUndefined();
   });
 });

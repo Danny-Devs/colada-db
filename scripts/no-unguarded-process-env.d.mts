@@ -23,5 +23,20 @@ export interface ProcessEnvViolation {
 /** Report every unguarded reference to the global `process` binding. */
 export function checkSource(sourceText: string, fileName?: string): ProcessEnvViolation[];
 
-/** Report violations across every shipped `.ts` file under the given paths. */
-export function checkPaths(paths: string[]): ProcessEnvViolation[];
+/**
+ * Report violations across every shipped source file under the given paths.
+ *
+ * @param paths targets to scan
+ * @param baseDir directory the paths resolve against (defaults to the repo root)
+ */
+export function checkPaths(paths: string[], baseDir?: string): ProcessEnvViolation[];
+
+/**
+ * Resolve targets to a concrete lintable-file list, separating out any that do
+ * not exist — the CLI exits 2 on a non-empty `missing`, so a typo'd path can
+ * never print a green tick over an empty scan.
+ */
+export function resolveTargets(
+  paths: string[],
+  baseDir?: string,
+): { files: string[]; missing: string[] };

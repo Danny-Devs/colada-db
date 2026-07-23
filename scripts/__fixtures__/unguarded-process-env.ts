@@ -42,3 +42,68 @@ export function invertedPolarity(): void {
     console.warn(process.env.NODE_ENV);
   }
 }
+
+// ── FIX 4 — CONTAINMENT is not DOMINANCE ──
+// Both of the next two CONTAIN a `typeof process` check and both passed the
+// pre-FIX-4 rule. Both still throw `ReferenceError` in a real browser realm
+// (verified under `node:vm` with `window` present and `process` genuinely
+// undeclared), because the check never controlled the read.
+
+// 6. a disjunction: the `window` arm alone satisfies the `&&`
+export function disjunctionIsNotDominance(): void {
+  if ((typeof window !== "undefined" || typeof process !== "undefined") && process.env.NODE_ENV !== "production") {
+    console.warn("throws in a browser");
+  }
+}
+
+// 7. a ternary: whether the check ran at all depends on `flag`
+export function ternaryConditionIsNotDominance(flag: boolean): void {
+  if ((flag ? typeof process !== "undefined" : true) && process.env.NODE_ENV !== "production") {
+    console.warn("throws when flag is false");
+  }
+}
+
+// 8. an early exit whose body does NOT exit dominates nothing
+export function nonTerminalEarlyGuard(): string {
+  if (typeof process === "undefined") console.warn("no process");
+  return String(process.env.NODE_ENV);
+}
+
+// 9. an early exit of the WRONG polarity: reaching the tail proves `process` is
+//    absent, which is the opposite of a licence to read it
+export function earlyExitWrongPolarity(): string {
+  if (typeof process !== "undefined") return "node";
+  return String(process.env.NODE_ENV);
+}
+
+// ── FIX 5 — `globalThis.process` is the same hazard in a portable-looking hat ──
+// In a browser `globalThis.process` is `undefined`, so `.env` throws
+// `TypeError: Cannot read properties of undefined` — same place, same
+// degradation path, same bundler-less audience. The rule's own message names
+// `process` as "a Node global", which is precisely what invites this rewrite.
+
+// 10. the invited workaround
+export function viaGlobalThis(): void {
+  if (globalThis.process.env.NODE_ENV !== "production") {
+    console.warn("TypeError in a browser");
+  }
+}
+
+// 11. `self` is the same object in a worker — the engines' own realm
+export function viaSelf(): string {
+  // @ts-expect-error fixture: `self.process` is exactly the unsound access being pinned
+  return String(self.process.env.NODE_ENV);
+}
+
+// 12. `?.` AFTER the process member does not protect the member read itself
+export function optionalAfterIsTooLate(): string | undefined {
+  return globalThis.process.env?.NODE_ENV;
+}
+
+// ── FIX 3c — the escape hatch must stay AUDITABLE ──
+
+// 13. a reasonless suppression is itself a violation: without this, the hatch
+//     is just a mute button and the rule is one comment away from dead
+export function reasonlessSuppression(): string {
+  return String(process.env.NODE_ENV); // lint-ok: no-unguarded-process-env
+}

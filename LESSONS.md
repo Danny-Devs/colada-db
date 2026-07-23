@@ -4,6 +4,103 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-07-23] — an environment guard can be runtime-CORRECT and build-time WRONG, and no semantic test can tell
+
+**Mistake:** the guard shipped for the `process` fix was
+`typeof process !== "undefined" && process.env?.NODE_ENV !== "production"`. It is
+safe. It never throws. It returns exactly the right boolean in every runtime. All
+30 tests written to police it passed — and it silently broke dead-code
+elimination in every downstream production bundle. `@rollup/plugin-replace` (and
+Vite's production `define`, and webpack's `DefinePlugin`) substitute the
+**literal** member expression `process.env.NODE_ENV`; a `?.` between `env` and
+`NODE_ENV` leaves no literal to find. Measured on the canonical Rollup chain:
+the branch stopped folding, +1,106 bytes minified / +400 gzipped, and all five
+internal dev-warning strings leaked into consumers' production bundles. The
+shipped `dist/index.mjs` contained `process.env?.NODE_ENV` 5× and
+`process.env.NODE_ENV` **0×** — a literal definer had nothing to replace.
+
+**Why it happened:** every test we had was a SEMANTIC test — evaluate the
+expression, assert the value. `process.env?.NODE_ENV` and
+`process.env && process.env.NODE_ENV` are runtime-identical, so a semantic suite
+is *structurally incapable* of distinguishing them. The difference lives one
+layer down, in what a build tool can see in the source text, and nothing in the
+repo looked at that layer. The optional chaining also *reads* like the more
+careful choice, which is what got it past review.
+
+**Fix:** the vB shape at all five sites —
+`typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production"`
+— which strips cleanly under a literal definer AND still tolerates a `process`
+shim with no `.env` (the plain conjunct evaluates falsy instead of throwing).
+The durable encoding is the **strippability pin** in
+`src/process-guard.spec.ts`: every guard extracted from shipped source must
+contain the literal substring `process.env.NODE_ENV`, plus a tree-wide check
+that nothing optional-chains between `process.env` and `NODE_ENV`, plus a
+positive control proving the detector fires on the broken shape. The lint's
+suggested-fix message — which had been prescribing the broken shape, steering
+every future fix into the same hole — now teaches the strippable form and states
+why in one sentence.
+
+**For future agents:** when a value only exists because a build tool substitutes
+it, correctness has TWO axes — what it evaluates to, and what a definer can
+recognise. Semantic tests only cover the first. If a code shape exists to
+cooperate with a toolchain, pin the SHAPE, not just the behaviour: assert the
+literal text a `define`/`replace` pass keys on. And write to the strictest
+definer in the ecosystem, not the smartest — esbuild folds the `?.` form
+happily, which is exactly why measuring against esbuild alone would have
+concluded "no problem".
+
+*Correction to the entry below (append-only, so stated here): it names Deno among
+the crashing runtimes. That is wrong — Deno 2.7.9 exposes `process` via Node
+compatibility (`typeof process === "object"`), verified 2026-07-23; it never
+threw, before or after. The real beneficiaries are browsers / CDN /
+`<script type=module>`, which WERE observed crashing pre-fix and degrading
+cleanly post-fix in real Chrome 149.*
+
+## [2026-07-23] — a lint that tests CONTAINMENT instead of DOMINANCE is worse than no lint
+
+**Mistake:** `no-unguarded-process-env` decided a read was safe by asking "does a
+`typeof process` check appear ANYWHERE in the left subtree of this `&&`". It
+does not follow that the check controlled the read.
+`(typeof window !== "undefined" || typeof process !== "undefined") && process.env…`
+passed the lint, passed the companion regression, and still throws
+`ReferenceError` in a real browser realm — executed under `node:vm` with `window`
+present and `process` genuinely undeclared. Two green gates over code that
+crashes is strictly worse than no gate: the next author trusts the tick.
+
+Two sibling defects came from the same "close enough" posture. The rule exempted
+every identifier in a name position, which swallowed `globalThis.process` — the
+single most likely workaround, because the rule's OWN error message ("`process`
+is a Node global") is what invites it, and it fails identically with a
+`TypeError`. And the rule rejected both of this repo's house idioms for ambient
+globals (the inverted early return in `persist.ts`, the hoisted boolean in
+`engines/idb.ts`) while offering no suppression mechanism at all — so the only
+escape from a false positive was deleting the rule from `package.json`.
+
+**Why it happened:** containment is the easy AST query and dominance is the
+correct one, and the fixtures written alongside the rule only exercised shapes
+the author already had in mind. A rule authored and tested by the same pass
+inherits that pass's blind spots wholesale.
+
+**Fix:** real dominance — recurse through `&&` only for positive guards and `||`
+only for negative ones (the exact dual: `a && b` truthy proves either conjunct;
+`a || b` falsy proves both disjuncts), never through the opposite connective, a
+ternary, a call, or a parenthesized disjunction. Plus early-exit dominance,
+same-file const propagation, `globalThis`/`self`/`window`/`global` member reads,
+and a mandatory-reason `// lint-ok: <rule> — <reason>` escape hatch. Every new
+capability carries a fixture AND a firing proof: the old rule and the new rule
+were run side by side over 13 shapes, 8 of which the new rule decides
+DIFFERENTLY.
+
+**For future agents:** a guard licenses a read only when *reaching* that read
+proves the guard held. When writing any static check, state the dominance
+question explicitly and recurse only through connectives that preserve it. Two
+further rules earned here: (1) prove each capability by showing the verdict
+CHANGE — red before, green after — because a capability with no firing proof is
+not encoded, it is only claimed; (2) give every required gate an auditable
+escape hatch with a mandatory reason, because a gate that cannot be satisfied
+gets deleted, and a comment in the diff is reviewable where a `package.json`
+edit is not.
+
 ## [2026-07-23] — a global your toolchain polyfills away is invisible until it reaches the one user who has no toolchain
 
 **Mistake:** five dev-warning branches read `process.env.NODE_ENV` bare

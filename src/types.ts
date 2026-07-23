@@ -608,20 +608,40 @@ export function defineEntity<T extends EntityRecord = EntityRecord>(
  * than `Symbol()`, so that two copies of colada-db loaded in one page agree on
  * ref identity. With a plain `Symbol()` the marker is per-module-instance:
  * `isEntityRef` in copy A returns `false` for a ref minted by copy B, and refs
- * silently degrade to opaque data. That is not hypothetical — the chip-3
- * migration has the Pinia Colada adapter carrying its own engine copy
- * alongside an app-level `colada-db` (see AGENTS.md), which is exactly the
- * duplicate-instance case this closes.
+ * silently degrade to opaque data. The case this actually closes is **two
+ * `colada-db` copies deduped apart by npm** — a version skew (an app on one
+ * range, a dependency on another) that chip 3 makes possible the moment the
+ * Pinia Colada adapter swaps its frozen engine copy for a `colada-db`
+ * dependency. It does NOT close the pre-chip-3 frozen copy: that copy declares
+ * its own `Symbol("pinia-colada-entity-ref")` — a plain symbol with a different
+ * description — which `Symbol.for` cannot intern with. Closing that case would
+ * require the plugin copy to adopt this same registry key.
  *
- * Scope note: this marker is in-memory identity ONLY and is never serialized —
- * the wire/disk format uses the string key `__cdb_ref` (ADR-018), whose
- * shape+type validation was hardened separately in DAN-648. Changing this
- * symbol therefore cannot affect any persisted data.
+ * ## Versioning rule (ADR-019)
+ *
+ * The registry key carries an explicit `@1` suffix. A global registry interns
+ * across VERSIONS as well as across instances, so without a version suffix a
+ * page holding v1 and v2 would have v1's `isEntityRef` accept a v2 ref — and
+ * the v1 encode path would then rewrite it using v1's field expectations. The
+ * plain `Symbol()` this replaced degraded such cross-version refs safely to
+ * opaque data; the suffix restores that fail-safe while keeping 100% of the
+ * duplicate-instance benefit within a major.
+ *
+ * **Bump the suffix on any breaking change to the ref SHAPE** (adding,
+ * removing, renaming, or retyping `entityType` / `id` / `key`). Do not bump it
+ * for unrelated majors — the suffix versions the ref contract, not the package.
+ *
+ * Scope note: the symbol VALUE is never serialized — the wire/disk format uses
+ * the string key `__cdb_ref` (ADR-018), whose shape+type validation was
+ * hardened separately in DAN-648. But symbol IDENTITY is the branch condition
+ * in `encodeEntityRefs`, so it does gate what gets written. For a single
+ * instance the emitted bytes are unchanged (verified byte-identical), so no
+ * migration is required.
  *
  * @remarks Exported from the package barrel. Its formal public-vs-internal
  * classification is settled by DAN-656, which owns the ref read-type surface.
  */
-export const ENTITY_REF_MARKER = Symbol.for("colada-db/entity-ref");
+export const ENTITY_REF_MARKER = Symbol.for("colada-db/entity-ref@1");
 
 /**
  * An entity reference that replaces the actual entity data in the query cache.

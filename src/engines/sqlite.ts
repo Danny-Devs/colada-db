@@ -107,7 +107,8 @@ export function sqliteEngine(options: SqliteEngineOptions): SqliteEngine {
       if (
         !info.persistent &&
         typeof process !== "undefined" &&
-        process.env?.NODE_ENV !== "production"
+        process.env &&
+        process.env.NODE_ENV !== "production"
       ) {
         console.warn(
           "[cdb-persist] OPFS unavailable — SQLite engine running in-memory (no durability). " +

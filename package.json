@@ -47,6 +47,7 @@
     "build": "tsdown",
     "fmt": "oxfmt",
     "play": "vite playground",
+    "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test && pnpm lint",
     "lint": "oxlint . && node scripts/no-unguarded-process-env.mjs",
     "lint:fix": "oxlint --fix . && node scripts/no-unguarded-process-env.mjs",
     "test": "vitest run",
