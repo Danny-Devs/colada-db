@@ -400,6 +400,15 @@ export interface EntityStore {
  *   idbEngine structured-clones (Dates survive), sqliteEngine JSON-encodes
  *   (Dates become strings; BigInt/circular throw and fail the batch).
  *   Entities should stick to JSON-safe fields for engine portability.
+ * - Serialization-divergence envelope (DAN-648 M3): `undefined`-valued fields
+ *   are preserved by the ref encoder but diverge at the engine boundary —
+ *   idbEngine (structured-clone) KEEPS an explicit `undefined` value, while
+ *   sqliteEngine (JSON.stringify) DROPS the key entirely. On read the field is
+ *   `undefined` either way (absent ≡ explicit-undefined for property access),
+ *   so this is not corruption; but `key in entity` / `Object.keys(entity)` can
+ *   differ across engines. Do not rely on key PRESENCE for optional fields;
+ *   rely on the VALUE. Entities should stick to JSON-safe fields (above) for
+ *   fully engine-uniform serialization.
  */
 export interface StorageEngine {
   /**
