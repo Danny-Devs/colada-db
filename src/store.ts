@@ -21,7 +21,7 @@ import { ENTITY_REF_MARKER } from "./types";
  * JSON.stringify. This string key is used as the wire format in toJSON/hydrate.
  * @internal
  */
-const ENTITY_REF_JSON_KEY = "__pcn_ref";
+const ENTITY_REF_JSON_KEY = "__cdb_ref";
 
 /**
  * Assign an OWN enumerable data property, safely, even when `key` collides

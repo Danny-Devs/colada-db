@@ -7,7 +7,7 @@ import { ENTITY_REF_MARKER } from "./types";
 // Reset IDB between tests to prevent cross-test contamination
 beforeEach(() => {
   // Delete all databases by closing and deleting
-  const dbNames = ["pcn_entities", "test-db", "custom-db"];
+  const dbNames = ["cdb_entities", "test-db", "custom-db"];
   return Promise.all(
     dbNames.map(
       (name) =>

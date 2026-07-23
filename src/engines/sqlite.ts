@@ -41,7 +41,7 @@ export interface SqliteEngineOptions {
    * A factory is preferred — the worker is only created on `open()`.
    */
   worker: Worker | (() => Worker);
-  /** Database file name inside OPFS. @default 'pcn_entities.sqlite3' */
+  /** Database file name inside OPFS. @default 'cdb_entities.sqlite3' */
   dbName?: string;
 }
 
@@ -54,7 +54,7 @@ export interface SqliteEngine extends StorageEngine {
 }
 
 export function sqliteEngine(options: SqliteEngineOptions): SqliteEngine {
-  const { worker: workerOrFactory, dbName = "pcn_entities.sqlite3" } = options;
+  const { worker: workerOrFactory, dbName = "cdb_entities.sqlite3" } = options;
 
   let worker: Worker | null = null;
   let nextId = 1;
@@ -107,7 +107,7 @@ export function sqliteEngine(options: SqliteEngineOptions): SqliteEngine {
       persistent = info.persistent;
       if (!info.persistent && process.env.NODE_ENV !== "production") {
         console.warn(
-          "[pcn-persist] OPFS unavailable — SQLite engine running in-memory (no durability). " +
+          "[cdb-persist] OPFS unavailable — SQLite engine running in-memory (no durability). " +
             "OPFS requires a secure context (https/localhost) and a browser with " +
             "navigator.storage.getDirectory support.",
         );

@@ -9,7 +9,7 @@
  *      JSON.parse'd / persisted data does) alongside a sibling EntityRef. The
  *      field is silently dropped AND the rebuilt object inherits from the
  *      supplied data. Prototype-pollution-adjacent.
- * M2 — decode treats any `{__pcn_ref:true, ...}`-shaped object as a ref even
+ * M2 — decode treats any `{__cdb_ref:true, ...}`-shaped object as a ref even
  *      when the ref fields are missing or the wrong type, hydrating malformed /
  *      dangling refs out of ordinary persisted data.
  * M3 — encode preserves `undefined`-valued fields, so the same entity
@@ -22,7 +22,7 @@ import { ENTITY_REF_MARKER } from "./types";
 import type { EntityRef } from "./types";
 
 const wireRef = (entityType: string, id: string) => ({
-  __pcn_ref: true,
+  __cdb_ref: true,
   entityType,
   id,
   key: `${entityType}:${id}`,
@@ -50,12 +50,12 @@ describe("DAN-648 M1 — __proto__ own-key survives the ref-rebuild path", () =>
     // The supplied payload must NOT be inherited as data.
     expect((encoded as { evil?: unknown }).evil).toBeUndefined();
     // Sibling ref still encoded to wire form.
-    expect((encoded.author as Record<string, unknown>).__pcn_ref).toBe(true);
+    expect((encoded.author as Record<string, unknown>).__cdb_ref).toBe(true);
   });
 
   it("decode: wire object with own __proto__ + sibling ref keeps __proto__ as own enumerable prop", () => {
     const wire = JSON.parse(
-      '{"id":"z","__proto__":{"evil":1},"author":{"__pcn_ref":true,"entityType":"contact","id":"42","key":"contact:42"}}',
+      '{"id":"z","__proto__":{"evil":1},"author":{"__cdb_ref":true,"entityType":"contact","id":"42","key":"contact:42"}}',
     ) as Record<string, unknown>;
 
     const decoded = decodeEntityRefs(wire) as Record<string, unknown>;
@@ -69,7 +69,7 @@ describe("DAN-648 M1 — __proto__ own-key survives the ref-rebuild path", () =>
 
   it("M1 nested: __proto__ inside a nested object on the rebuild path survives", () => {
     const wire = JSON.parse(
-      '{"outer":{"__proto__":{"evil":1},"child":{"__pcn_ref":true,"entityType":"c","id":"1","key":"c:1"}}}',
+      '{"outer":{"__proto__":{"evil":1},"child":{"__cdb_ref":true,"entityType":"c","id":"1","key":"c:1"}}}',
     ) as Record<string, unknown>;
 
     const decoded = decodeEntityRefs(wire) as Record<string, unknown>;
@@ -82,7 +82,7 @@ describe("DAN-648 M1 — __proto__ own-key survives the ref-rebuild path", () =>
 
   it("M1 array element: __proto__ in an object inside an array with a ref survives", () => {
     const wire = JSON.parse(
-      '[{"__proto__":{"evil":1},"r":{"__pcn_ref":true,"entityType":"c","id":"1","key":"c:1"}}]',
+      '[{"__proto__":{"evil":1},"r":{"__cdb_ref":true,"entityType":"c","id":"1","key":"c:1"}}]',
     ) as unknown[];
 
     const decoded = decodeEntityRefs(wire) as Array<Record<string, unknown>>;
@@ -95,7 +95,7 @@ describe("DAN-648 M1 — __proto__ own-key survives the ref-rebuild path", () =>
 
   it("M1 self-review: constructor / prototype own keys survive as own props on rebuild", () => {
     const wire = JSON.parse(
-      '{"constructor":"c-val","prototype":"p-val","r":{"__pcn_ref":true,"entityType":"c","id":"1","key":"c:1"}}',
+      '{"constructor":"c-val","prototype":"p-val","r":{"__cdb_ref":true,"entityType":"c","id":"1","key":"c:1"}}',
     ) as Record<string, unknown>;
 
     const decoded = decodeEntityRefs(wire) as Record<string, unknown>;
@@ -146,23 +146,23 @@ describe("DAN-648 M2 — decode validates the full ref shape", () => {
     expect(decoded.entityType).toBe("contact");
   });
 
-  it("__pcn_ref-shaped data missing id must NOT become a ref (stays plain data)", () => {
-    const plain = { __pcn_ref: true, entityType: "foo", key: "foo:bar" };
+  it("__cdb_ref-shaped data missing id must NOT become a ref (stays plain data)", () => {
+    const plain = { __cdb_ref: true, entityType: "foo", key: "foo:bar" };
     const decoded = decodeEntityRefs(plain) as Record<string | symbol, unknown>;
     expect(decoded[ENTITY_REF_MARKER]).toBeUndefined();
-    expect(decoded.__pcn_ref).toBe(true);
+    expect(decoded.__cdb_ref).toBe(true);
     expect(decoded.entityType).toBe("foo");
   });
 
-  it("__pcn_ref-shaped data with wrong-typed fields must NOT become a ref", () => {
-    const plain = { __pcn_ref: true, entityType: 123, id: {}, key: ["x"] };
+  it("__cdb_ref-shaped data with wrong-typed fields must NOT become a ref", () => {
+    const plain = { __cdb_ref: true, entityType: 123, id: {}, key: ["x"] };
     const decoded = decodeEntityRefs(plain) as Record<string | symbol, unknown>;
     expect(decoded[ENTITY_REF_MARKER]).toBeUndefined();
     expect(decoded.entityType).toBe(123);
   });
 
-  it("__pcn_ref !== true is never a ref", () => {
-    const plain = { __pcn_ref: "yes", entityType: "foo", id: "bar", key: "foo:bar" };
+  it("__cdb_ref !== true is never a ref", () => {
+    const plain = { __cdb_ref: "yes", entityType: "foo", id: "bar", key: "foo:bar" };
     const decoded = decodeEntityRefs(plain) as Record<string | symbol, unknown>;
     expect(decoded[ENTITY_REF_MARKER]).toBeUndefined();
   });
