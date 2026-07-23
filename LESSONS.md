@@ -4,6 +4,59 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-07-22] — rebuilding an object key-by-key must never use `obj[key] = v` for `__proto__`
+
+**Mistake:** `encodeEntityRefs` / `decodeEntityRefs` rebuilt objects with
+`result[key] = value` in a loop. When the source carried an OWN enumerable
+`__proto__` key (JSON.parse and structured-clone both produce such keys from
+persisted data) alongside a sibling `EntityRef` forcing the rebuild path, the
+assignment invoked the `__proto__` *setter* on the fresh `{}` — silently
+dropping the field AND reassigning the rebuilt object's prototype to the
+supplied payload (prototype-pollution-adjacent). Symmetric bug in both codecs;
+undetected because the common no-ref path short-circuits with an identity
+return and never rebuilds.
+
+**Why it happened:** `result[key] = value` reads as an obviously-correct own
+-property write. It is — for every key EXCEPT `__proto__`, the one string key
+that is an accessor on `Object.prototype`. The hazard only surfaces with
+attacker-or-persisted data that has an own `__proto__` key AND a sibling ref,
+so ordinary tests (object literals, ref-free data) never hit it.
+
+**Fix:** `assignOwn(target, key, value)` — `Object.defineProperty` with a data
+descriptor for `key === "__proto__"`, plain assignment otherwise. Regression:
+`src/encode-decode-integrity.spec.ts` (M1 cases incl. nested, array, and a
+constructor/prototype control proving those keys are already safe).
+
+**For future agents:** any loop that rebuilds a plain object from untrusted or
+persisted key/value pairs (`result[k] = v`) is a `__proto__` trap — route the
+assignment through a helper that special-cases `__proto__` with
+`Object.defineProperty`. `constructor`/`prototype` are data properties and need
+no guard; `__proto__` is the sole accessor and the sole hazard.
+
+## [2026-07-22] — a Symbol in-memory marker with a plain-string wire key reopens the collision the Symbol closed
+
+**Mistake:** `EntityRef` uses a `Symbol` marker specifically to avoid colliding
+with user data (Issue #13), but the wire codec serializes it to the plain string
+key `__pcn_ref` and the decode guard accepted ANY `{__pcn_ref:true, entityType,
+key}`-shaped object as a ref — without requiring `id` or checking field types.
+Ordinary persisted data shaped that way (or malformed collisions like
+`entityType:123`) hydrated into broken / dangling `EntityRef`s.
+
+**Why it happened:** the Symbol's collision-proofness lives only in memory; the
+moment you cross a JSON/structured-clone boundary you're back to a string key
+that user data can imitate, and the guard trusted the marker alone.
+
+**Fix:** validate the FULL ref shape with correct types
+(`entityType`/`id`/`key` all `string`) on decode; non-conforming data passes
+through as plain data. The residual exact-shape-and-type collision is inherent
+to a string wire marker and is bounded honestly in a code comment rather than
+papered over.
+
+**For future agents:** whenever an in-memory Symbol/branded marker is projected
+to a serializable string key, the decode side must re-validate the FULL
+structural shape+types — a string marker is a hint, never proof, and the
+collision the Symbol closed is wide open on the wire.
+
 ## [2026-07-21] — snapshot-then-bulk-clear is never reentrant-safe when listeners can write
 
 **Mistake:** `clear()` drained per-entity `remove` events (listeners run
