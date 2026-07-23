@@ -4,6 +4,53 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-07-23] — `set -e` is IGNORED for `!`-negated commands, so `! grep -q ...` is a shell assertion that cannot fail
+
+**Mistake:** the DAN-658 CI workflow cross-checked the publish surface with the
+obvious spelling of an absence assertion:
+
+```bash
+set -euo pipefail
+! grep -q "pinia-colada-plugin-normalizer" dist/index.d.mts dist/index.mjs
+grep -q "process\.env\.NODE_ENV" dist/index.mjs
+! grep -q "process\.env?\.NODE_ENV" dist/index.mjs
+! grep -q "@vue/reactivity" dist/index.d.mts
+```
+
+Three of those four lines were **no-ops**. POSIX: *"The shell shall not exit if
+the command that fails ... has its return value inverted with `!`."* `set -e`
+is explicitly disabled for `!`-negated commands, so a `! grep` line reads as an
+assertion and behaves as a comment. Measured on the real artifact: injecting the
+forbidden plugin branding produced **exit 0**; injecting
+`process.env?.NODE_ENV` — the exact DAN-649 regression the line existed to
+catch — also produced **exit 0**. Only the bare (non-negated) `grep -q` actually
+gated, and the final `! grep` appeared to work purely by accident of being the
+script's last command, where its status becomes the script's exit code.
+
+**Why it happened:** the spelling is idiomatic, reads correctly in English, and
+was carried in verbatim from the ticket. It was never run against a violating
+artifact — the workflow was observed passing on a clean tree and on a red run
+where an earlier step failed first, so the cross-check step never once executed
+against input it was supposed to reject. A gate whose *failure* path has never
+executed is not a gate; it is decoration that suppresses suspicion.
+
+**Fix:** `scripts/cross-check-publish-surface.sh` — explicit `if ... ; then
+exit 1; fi` helpers (`assert_absent` / `assert_present`), which have no
+interaction with `set -e` whatsoever, plus a **self-test that runs both helpers
+against poisoned fixtures before any real assertion** and aborts if either fails
+to fire. All four invariants were then re-verified by corrupting `dist/` four
+different ways and confirming exit 1 each time.
+
+**For future agents:** never write `! cmd` and expect `set -e` to catch it —
+use `if cmd; then exit 1; fi`. More generally, this is the same family as
+DAN-657 (`grep -c` exits 1 on zero matches, so an "expect zero" check reads a
+PASS as a FAIL): **in shell, an assertion's exit code frequently does not mean
+what it looks like it means.** The only reliable defense is the one this repo
+already applies to its lint rules — make every gate demonstrate that it can
+FAIL, against a fixture engineered to trip it, before trusting that it passed.
+Copying an assertion from a ticket, an ADR, or a code review does not transfer
+that proof; run it red yourself.
+
 ## [2026-07-23] — an environment guard can be runtime-CORRECT and build-time WRONG, and no semantic test can tell
 
 **Mistake:** the guard shipped for the `process` fix was

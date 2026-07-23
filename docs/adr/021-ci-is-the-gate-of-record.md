@@ -83,11 +83,21 @@ one.
   identifies: an assertion that only fires in CI is the same disease as an
   assertion that only fires when a human types the command, relocated. The
   checks live in a script that also runs from `pnpm check:publish-surface`, the
-  pre-push hook, and `prepublishOnly`. The raw `grep` form is **retained in the
-  workflow as an independent cross-check** — the script's positive controls
-  prove each *detector* can fire, but cannot catch the script reading a wrong
-  yet existing path, under which controls and assertions would both pass
-  vacuously. Two implementations with genuinely independent failure modes.
+  pre-push hook, and `prepublishOnly`. A `grep`-based leg is **retained as an
+  independent cross-check** (`scripts/cross-check-publish-surface.sh`) — the
+  script's positive controls prove each *detector* can fire, but cannot catch
+  the script reading a wrong yet existing path, under which controls and
+  assertions would both pass vacuously. Two implementations with genuinely
+  independent failure modes.
+
+  *Amended during self-review, before merge:* the cross-check was first written
+  as four inline `! grep -q ...` lines under `set -euo pipefail`, exactly as the
+  ticket specified. Three of them were no-ops — POSIX disables `set -e` for
+  `!`-negated commands — so the leg asserted almost nothing. It now uses
+  explicit `if ... exit 1` helpers and self-tests them against poisoned fixtures
+  before asserting. Recorded here rather than quietly fixed because it is the
+  strongest available evidence for this ADR's central claim: **a gate whose
+  failure path has never executed is not a gate.** See LESSONS.md 2026-07-23.
 - **Auto-installing the pre-push hook via a `prepare` lifecycle script.**
   Rejected. It would silently mutate a contributor's git config on `pnpm
   install`, which is a surprise, and it buys little: a hook is bypassable with

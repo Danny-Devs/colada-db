@@ -108,24 +108,18 @@ jobs:
       - name: Assert publish surface
         run: node scripts/check-publish-surface.mjs
 
-      # Independent cross-check, different tool, hardcoded paths. This is not
-      # redundant with the step above: the script's positive controls prove each
-      # DETECTOR can fire, but they cannot catch the script reading the wrong
-      # (yet existing) file — a failure mode under which both the controls and
-      # the assertions would pass vacuously. Raw grep against literal paths is
-      # the cheapest thing that fails when that happens.
+      # Independent cross-check: same four invariants, different tool, literal
+      # hardcoded paths. Not redundant with the step above — the Node script's
+      # positive controls prove each DETECTOR can fire, but cannot catch the
+      # script reading a wrong-yet-existing file, under which both the controls
+      # and the assertions would pass vacuously.
       #
-      # Every line is an ASSERTION that exits 0 when the invariant holds. Note
-      # the leading `!` on the absence checks: `grep -c pattern file` exits 1
-      # when the count is zero, so the intuitive "expect 0 matches" spelling
-      # reads a PASS as a FAIL inside a `&&` chain or under `set -e` (DAN-657).
-      - name: Cross-check with raw grep
-        run: |
-          set -euxo pipefail
-          ! grep -q "pinia-colada-plugin-normalizer" dist/index.d.mts dist/index.mjs
-          grep -q "process\.env\.NODE_ENV" dist/index.mjs
-          ! grep -q "process\.env?\.NODE_ENV" dist/index.mjs
-          ! grep -q "@vue/reactivity" dist/index.d.mts
+      # The script self-tests its own helpers before asserting, and uses explicit
+      # `if`/`exit 1` rather than `! grep -q ...`. That is not style: `set -e` is
+      # IGNORED for `!`-negated commands (POSIX), so the obvious spelling is a
+      # silent no-op. See LESSONS.md 2026-07-23.
+      - name: Cross-check publish surface (independent implementation)
+        run: bash scripts/cross-check-publish-surface.sh
 
       # The `files` allowlist decides what a consumer actually receives. A
       # `pnpm pack` that fails, or that silently omits dist, is a publish-day
