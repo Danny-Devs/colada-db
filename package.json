@@ -45,11 +45,15 @@
   },
   "scripts": {
     "build": "tsdown && node scripts/check-public-types.mjs",
+    "check:pack-manifest": "bash scripts/check-pack-manifest.sh",
+    "check:publish-surface": "node scripts/check-publish-surface.mjs",
     "fmt": "oxfmt",
+    "hooks:install": "git config core.hooksPath .githooks && echo 'pre-push hook enabled (core.hooksPath=.githooks)'",
+    "hooks:uninstall": "git config --unset core.hooksPath || true; echo 'pre-push hook disabled'",
     "play": "vite playground",
-    "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test && pnpm lint",
-    "lint": "oxlint . && node scripts/no-unguarded-process-env.mjs",
-    "lint:fix": "oxlint --fix . && node scripts/no-unguarded-process-env.mjs",
+    "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test && pnpm lint && pnpm check:publish-surface && pnpm check:pack-manifest",
+    "lint": "oxlint --deny-warnings . && node scripts/no-unguarded-process-env.mjs",
+    "lint:fix": "oxlint --fix --deny-warnings . && node scripts/no-unguarded-process-env.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

@@ -4,6 +4,128 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-07-23] — Node package SELF-REFERENCE resolves `import("your-pkg")` to the workspace, so a consumer smoke test that lives inside the package never opens the tarball
+
+**Mistake:** the DAN-658 `engines-floor` CI job exists for exactly one purpose —
+prove the *packed tarball* installs and runs on Node 18, the version
+`engines.node` promises. It did this:
+
+```yaml
+mkdir -p "$RUNNER_TEMP/floor" && cd "$RUNNER_TEMP/floor"
+npm init -y
+npm install "$RUNNER_TEMP"/colada-db-*.tgz "@vue/reactivity@$VUE_RANGE"
+node "$GITHUB_WORKSPACE/scripts/smoke-consumer.mjs"    # ← the bug
+```
+
+The script does `await import("colada-db")`. Node's **package self-reference**
+rule resolves a bare specifier for a package's own name through the *nearest
+enclosing* `package.json`'s `exports` map — based on **the importing file's
+location, not the process's working directory, and without consulting any
+`node_modules`**. `scripts/smoke-consumer.mjs` lives inside the `colada-db`
+package, so `import("colada-db")` loaded `$GITHUB_WORKSPACE/dist/index.mjs`: the
+local build. The `cd` into the consumer directory did nothing. The `npm install`
+was decorative.
+
+Measured 2026-07-23, all three cases executed:
+
+| consumer dir contains | script location | result |
+|---|---|---|
+| a bare `package.json`, **nothing installed** | inside the package | **exit 0 — every assertion green**, including "✔ colada-db runs on the claimed engines floor" |
+| a tarball built with `files: ["LICENSE","README.md"]` (ships no `dist`) | inside the package | **exit 0** |
+| nothing installed | copied into the consumer dir | exit 1, `ERR_MODULE_NOT_FOUND 'colada-db'` |
+| the real tarball | copied into the consumer dir | exit 0 |
+| the `files`-stripped tarball | copied into the consumer dir | exit 1, `ERR_MODULE_NOT_FOUND .../dist/sqlite-worker.mjs` |
+
+So the one job in the repo whose entire job was to open the tarball never opened
+it, and had never once executed against input it was supposed to reject.
+
+**Why it happened:** the author reasoned carefully about the *install* location
+— there is a comment explaining why the consumer dir must be outside the
+workspace, so the repo `.npmrc` and pnpm's linked layout cannot contaminate the
+test — and did not consider that the *script's* location is what determines bare-
+specifier resolution. Self-reference is a real, spec'd, on-by-default Node
+feature that most people meet only as a convenience ("import my own package by
+name in my own tests"). Nothing about it is visible at the call site: the import
+looks identical whether it resolves to `node_modules` or to the workspace. And it
+fails in the flattering direction — it makes a broken artifact look fine.
+
+**Fix:** the workflow now **copies the script into the consumer directory** before
+running it, so the importing file is no longer inside the package:
+
+```yaml
+cp "$GITHUB_WORKSPACE/scripts/smoke-consumer.mjs" ./smoke-consumer.mjs
+node ./smoke-consumer.mjs
+```
+
+And because a `cp` in a YAML file is easy to "simplify" away later, the script
+itself now **fails closed** before it asserts anything: it resolves
+`colada-db/package.json` via `createRequire(import.meta.url)` (works on Node 18,
+unlike `import.meta.resolve`) and refuses to continue unless the resolved path
+contains a `node_modules` segment. Run it in place and it exits 1 with an
+explanation, instead of silently testing the wrong artifact. `dist/sqlite-worker.mjs`
+— the second published entry point, previously ungated entirely — is imported
+there too.
+
+**For future agents:** **a "consumer" test must be run from a file that is not
+inside the package.** If the importing file lives in the repo, `import("your-pkg")`
+is a self-reference and you are testing your working tree, not what you shipped.
+The general form of this trap is the one this repo has now hit five times in a
+day — *a check that reports success on a question it never evaluated*
+(`grep -c` exiting 1 on success; `! grep -q` no-oping under `set -e`; a lint
+reporting clean on a scan that never opened the file; an absence assertion over a
+zero-byte file; and this). The defense is always the same and it is not code
+review: **make the gate go red on purpose, against a deliberately broken subject,
+before you believe it went green.** For an artifact gate specifically, the
+cheapest such subject is a tarball with `files` stripped — build it, install it,
+and watch the job fail.
+
+## [2026-07-23] — `set -e` is IGNORED for `!`-negated commands, so `! grep -q ...` is a shell assertion that cannot fail
+
+**Mistake:** the DAN-658 CI workflow cross-checked the publish surface with the
+obvious spelling of an absence assertion:
+
+```bash
+set -euo pipefail
+! grep -q "pinia-colada-plugin-normalizer" dist/index.d.mts dist/index.mjs
+grep -q "process\.env\.NODE_ENV" dist/index.mjs
+! grep -q "process\.env?\.NODE_ENV" dist/index.mjs
+! grep -q "@vue/reactivity" dist/index.d.mts
+```
+
+Three of those four lines were **no-ops**. POSIX: *"The shell shall not exit if
+the command that fails ... has its return value inverted with `!`."* `set -e`
+is explicitly disabled for `!`-negated commands, so a `! grep` line reads as an
+assertion and behaves as a comment. Measured on the real artifact: injecting the
+forbidden plugin branding produced **exit 0**; injecting
+`process.env?.NODE_ENV` — the exact DAN-649 regression the line existed to
+catch — also produced **exit 0**. Only the bare (non-negated) `grep -q` actually
+gated, and the final `! grep` appeared to work purely by accident of being the
+script's last command, where its status becomes the script's exit code.
+
+**Why it happened:** the spelling is idiomatic, reads correctly in English, and
+was carried in verbatim from the ticket. It was never run against a violating
+artifact — the workflow was observed passing on a clean tree and on a red run
+where an earlier step failed first, so the cross-check step never once executed
+against input it was supposed to reject. A gate whose *failure* path has never
+executed is not a gate; it is decoration that suppresses suspicion.
+
+**Fix:** `scripts/cross-check-publish-surface.sh` — explicit `if ... ; then
+exit 1; fi` helpers (`assert_absent` / `assert_present`), which have no
+interaction with `set -e` whatsoever, plus a **self-test that runs both helpers
+against poisoned fixtures before any real assertion** and aborts if either fails
+to fire. All four invariants were then re-verified by corrupting `dist/` four
+different ways and confirming exit 1 each time.
+
+**For future agents:** never write `! cmd` and expect `set -e` to catch it —
+use `if cmd; then exit 1; fi`. More generally, this is the same family as
+DAN-657 (`grep -c` exits 1 on zero matches, so an "expect zero" check reads a
+PASS as a FAIL): **in shell, an assertion's exit code frequently does not mean
+what it looks like it means.** The only reliable defense is the one this repo
+already applies to its lint rules — make every gate demonstrate that it can
+FAIL, against a fixture engineered to trip it, before trusting that it passed.
+Copying an assertion from a ticket, an ADR, or a code review does not transfer
+that proof; run it red yourself.
+
 ## [2026-07-23] — an environment guard can be runtime-CORRECT and build-time WRONG, and no semantic test can tell
 
 **Mistake:** the guard shipped for the `process` fix was

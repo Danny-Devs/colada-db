@@ -1,0 +1,35 @@
+# EXPECTED PUBLISH MANIFEST — the exact file list `npm publish` would upload.
+#
+# This is a HUMAN-MAINTAINED allowlist, and it is asserted in BOTH directions by
+# `scripts/check-pack-manifest.sh` (run in CI's `publish surface` job, and
+# locally via `pnpm check:pack-manifest`). A file missing from the tarball fails.
+# A file present in the tarball but absent from this list fails too.
+#
+# Adding a published file is a DELIBERATE ACT. If a build change adds an entry
+# here, the question to answer before editing this file is not "how do I make CI
+# green" — it is "did I mean to ship this to every consumer, forever, under this
+# path?" Publish surface is a compatibility promise: removing a path later is a
+# breaking change, and shipping a path by accident (a `.env`, a source tree, a
+# fixture, a map you did not mean to expose) cannot be un-shipped from a version
+# already on the registry.
+#
+# Format: one path per line, relative to the tarball's `package/` prefix, sorted
+# with `LC_ALL=C sort` (byte order — uppercase before lowercase). Lines starting
+# with `#` and blank lines are ignored. Regenerate the raw list with:
+#
+#   pnpm pack --pack-destination /tmp && \
+#     tar -tzf /tmp/colada-db-*.tgz | sed 's|^package/||' | LC_ALL=C sort
+#
+# Contents are governed by the `files` field in package.json (plus the files npm
+# always includes: package.json, README, LICENSE).
+LICENSE
+README.md
+dist/index.d.mts
+dist/index.d.mts.map
+dist/index.mjs
+dist/index.mjs.map
+dist/sqlite-worker.d.mts
+dist/sqlite-worker.d.mts.map
+dist/sqlite-worker.mjs
+dist/sqlite-worker.mjs.map
+package.json
