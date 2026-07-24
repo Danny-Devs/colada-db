@@ -19,7 +19,7 @@ Consolidated fix pass from an adversarial review of the CI landed in the entry b
 |---|---|---|
 | [30054860691](https://github.com/Danny-Devs/colada-db/actions/runs/30054860691) | the fix pass (`ecc8d14`) | **all 5 jobs green.** `engines floor` log shows `v18.20.8` → `✔ package resolved from node_modules (not a package self-reference)` → 11 assertions incl. `✔ ./sqlite-worker subpath resolves and parses on this Node` → `✔ colada-db runs on the claimed engines floor (v18.20.8)`. |
 | [30054969287](https://github.com/Danny-Devs/colada-db/actions/runs/30054969287) | scratch `80c24a0`, `files` stripped to `["LICENSE","README.md"]` | **`publish surface` RED and `engines floor` RED, `gate` green ×3** — a red X that names the failing gate. `publish surface` failed at the manifest diff with 7 `-` lines. `engines floor` got past `✔ package resolved from node_modules` and then died on `ERR_MODULE_NOT_FOUND .../floor/node_modules/colada-db/dist/sqlite-worker.mjs` — a `node_modules` path, i.e. it read the tarball. **This is the exact package shape that went green before the fix.** |
-| [30055117553](https://github.com/Danny-Devs/colada-db/actions/runs/30055117553) | revert `f34a5e3` | back to all 5 jobs green. |
+| [30055078147](https://github.com/Danny-Devs/colada-db/actions/runs/30055078147) | revert `f34a5e3` + this entry (`a0cc91b`) | back to all 5 jobs green. |
 
 ## [2026-07-23] — DAN-658: the repo had no CI, so every "durable encoding" shipped this week fired only when a human typed the command (branch `tackle/dan-658-ci-workflow`)
 
