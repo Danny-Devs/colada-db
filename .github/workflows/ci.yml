@@ -8,8 +8,14 @@
 #
 # Three jobs, deliberately independent so a failure names itself:
 #   gate            — the four DoR commands, on every Node the TOOLCHAIN supports
-#   publish-surface — textual invariants of the BUILT artifact
+#   publish-surface — textual invariants of the BUILT artifact, plus the packed
+#                     file list diffed against a checked-in expected manifest
 #   engines-floor   — the artifact actually runs on the Node `engines` claims
+#
+# ⚠️ CI is currently ADVISORY, not blocking: the repo is private on a plan
+# without branch protection (`gh api .../branches/main/protection` → 403), so a
+# red run does not stop a merge. See ADR-021 "Enforcement status" for the checks
+# to mark required once that changes, and do not use `[skip ci]` here meanwhile.
 #
 # On the Node split (the non-obvious part, see ADR-021): `engines.node` says
 # ">=18", but the dev toolchain floor is 20.19 (tsdown >=20.19, oxlint and vite
