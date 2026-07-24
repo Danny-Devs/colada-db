@@ -31,7 +31,8 @@
   },
   "files": [
     "LICENSE",
-    "README.md"
+    "README.md",
+    "dist"
   ],
   "type": "module",
   "sideEffects": false,
