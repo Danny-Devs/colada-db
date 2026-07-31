@@ -4,6 +4,30 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-07-31] — a `webServer` with `reuseExistingServer: true` on a fixed port will happily test a STRANGER'S dev server
+
+**Mistake:** the first run of the L4 browser lane (DAN-652) failed with six
+identical 30-second timeouts waiting for the fixture to boot. The fixture was
+fine. Port 5180 was already held by an unrelated project's dev server on this
+machine, and Playwright's `reuseExistingServer: true` attached to it — so the
+suite loaded a Sui testnet oracle app and waited for colada-db's fixture to
+appear on it.
+
+**Why it happened:** Playwright's reuse check is *"is anything listening on
+this URL"*. It cannot tell our fixture from any other program, and a dev
+machine runs several. The config asked a question that has no honest answer.
+
+**Fix:** `reuseExistingServer: false` in `playwright.config.ts`, plus
+`strictPort: true` on the fixture's vite config, so a busy port is a loud
+startup failure instead of a silent misdirection. The specs also keep a
+fixture handshake — each waits for `window.__cdb`, a symbol only our page
+defines — which is what turned this into a visible failure rather than a
+green run against the wrong application.
+
+**For future agents:** never let a test suite reuse a server it cannot
+identify; bind the port strictly and make the page prove it is yours before
+you assert anything about it.
+
 ## [2026-07-23] — Node package SELF-REFERENCE resolves `import("your-pkg")` to the workspace, so a consumer smoke test that lives inside the package never opens the tarball
 
 **Mistake:** the DAN-658 `engines-floor` CI job exists for exactly one purpose —

@@ -55,6 +55,7 @@
     "lint": "oxlint --deny-warnings . && node scripts/no-unguarded-process-env.mjs",
     "lint:fix": "oxlint --fix --deny-warnings . && node scripts/no-unguarded-process-env.mjs",
     "test": "vitest run",
+    "test:browser": "playwright test",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
@@ -68,6 +69,7 @@
     }
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@sqlite.org/sqlite-wasm": "3.53.0-build1",
     "@vue/reactivity": "^3.5.32",
     "fake-indexeddb": "^6.2.5",

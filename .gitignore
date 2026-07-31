@@ -1,3 +1,8 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Playwright (L4 real-browser lane, DAN-652) run artifacts — traces are
+# retained on failure and are large.
+test-results/
+playwright-report/
