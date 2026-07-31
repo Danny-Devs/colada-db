@@ -6,8 +6,10 @@
 # command. This workflow is what makes "lint > test > skill > LESSONS.md" true
 # here instead of aspirational.
 #
-# Three jobs, deliberately independent so a failure names itself:
+# Four jobs, deliberately independent so a failure names itself:
 #   gate            — the four DoR commands, on every Node the TOOLCHAIN supports
+#   browser         — the L4 durability lane: real IndexedDB + real OPFS, in a
+#                     real Chromium, with the page killed between write and read
 #   publish-surface — textual invariants of the BUILT artifact, plus the packed
 #                     file list diffed against a checked-in expected manifest
 #   engines-floor   — the artifact actually runs on the Node `engines` claims
@@ -85,6 +87,66 @@ jobs:
 
       - name: Build
         run: pnpm -r build
+
+  # ── The L4 real-browser durability lane (DAN-652) ──────────────────────────
+  # `gate` proves the engines agree with their stand-ins: happy-dom, a fake
+  # IndexedDB, a `:memory:` SQLite. This job is the only one where the storage
+  # is real and the process actually dies. Without it the lane would exist but
+  # never fire — a suite nothing triggers rots silently while still reading as
+  # coverage, which is the exact failure this repo's LESSONS.md keeps finding.
+  #
+  # NOT folded into `gate`: it needs a ~180 MB browser download and boots a dev
+  # server, so putting it in the matrix would triple that cost across three Node
+  # versions to prove something Node-version-independent. One Node is correct
+  # here — the variable under test is the BROWSER.
+  #
+  # Chromium only, matching playwright.config.ts. WebKit's OPFS quirks are
+  # roadmap 4.2; adding a browser nobody has run would be a green tick over an
+  # untested claim.
+  browser:
+    name: browser durability lane
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Keyed on the lockfile because that is what pins @playwright/test, and
+      # the browser build a Playwright release demands is a function of that
+      # version. A miss just means the download runs — never a wrong browser.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # `--with-deps` pulls the shared libraries headless Chromium needs on a
+      # bare runner; those are OS packages and are deliberately not cached.
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Real IndexedDB + real OPFS durability
+        run: CI=true pnpm test:browser
+
+      # playwright.config.ts sets `trace: retain-on-failure`, so this is empty
+      # on green and carries the full timeline on red. A durability failure is
+      # the kind you cannot reproduce by staring at the assertion.
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
 
   # ── Textual invariants of the shipped artifact ─────────────────────────────
   # Separate job, not a fifth step in `gate`: these assertions are about what
