@@ -1,7 +1,5 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
-import type { StorageEngine } from "../types";
-import { idbEngine } from "./idb";
 import { memoryEngine } from "./memory";
 import { createEntityStore } from "../store";
 import { enablePersistence } from "../persist";
@@ -14,82 +12,19 @@ import {
 } from "./sqlite-core";
 
 // ─────────────────────────────────────────────
-// StorageEngine contract suite
-// Every engine must pass these — add new engines here.
-// ─────────────────────────────────────────────
-
-function engineContract(name: string, makeEngine: () => StorageEngine) {
-  describe(`StorageEngine contract: ${name}`, () => {
-    it("round-trips puts through loadAll", async () => {
-      const engine = makeEngine();
-      expect(engine.isSupported()).toBe(true);
-      await engine.open();
-
-      await engine.writeBatch(
-        [
-          { key: "contact:1", value: { id: "1", name: "Alice" } },
-          { key: "order:5", value: { id: "5", total: 100 } },
-        ],
-        [],
-      );
-
-      const rows = await engine.loadAll();
-      const byKey = new Map(rows.map((r) => [r.key, r.data]));
-      expect(byKey.get("contact:1")).toEqual({ id: "1", name: "Alice" });
-      expect(byKey.get("order:5")).toEqual({ id: "5", total: 100 });
-      engine.close();
-    });
-
-    it("loadMany: subset load, missing keys omitted, empty input resolves []", async () => {
-      const engine = makeEngine();
-      await engine.open();
-      await engine.writeBatch(
-        [
-          { key: "contact:1", value: { id: "1" } },
-          { key: "contact:2", value: { id: "2" } },
-          { key: "order:9", value: { id: "9" } },
-        ],
-        [],
-      );
-
-      const rows = await engine.loadMany(["contact:2", "contact:missing", "order:9"]);
-      const keys = rows.map((r) => r.key).sort();
-      expect(keys).toEqual(["contact:2", "order:9"]); // missing omitted, no error
-      expect(rows.find((r) => r.key === "contact:2")?.data).toEqual({ id: "2" });
-
-      expect(await engine.loadMany([])).toEqual([]);
-      engine.close();
-    });
-
-    it("applies deletes and last-write-wins puts in one batch", async () => {
-      const engine = makeEngine();
-      await engine.open();
-
-      await engine.writeBatch([{ key: "contact:1", value: { v: 1 } }], []);
-      await engine.writeBatch(
-        [{ key: "contact:1", value: { v: 2 } }],
-        ["order:missing"], // deleting a nonexistent key must not throw
-      );
-      await engine.writeBatch([], ["contact:1"]);
-
-      const rows = await engine.loadAll();
-      expect(rows).toHaveLength(0);
-      engine.close();
-    });
-
-    it("loadAll on a fresh database is empty", async () => {
-      const engine = makeEngine();
-      await engine.open();
-      expect(await engine.loadAll()).toEqual([]);
-      engine.close();
-    });
-  });
-}
-
-engineContract("memoryEngine", () => memoryEngine());
-let idbCounter = 0;
-engineContract("idbEngine", () => idbEngine({ dbName: `contract-db-${++idbCounter}` }));
-
+// The shared StorageEngine contract now lives in the conformance kit
+// (`src/engine-conformance.ts`, run by `src/engine-conformance.spec.ts`) and
+// covers memory, idb AND the real sqlite-wasm SQL core — DAN-653 Part B.
+//
+// It used to be duplicated here against memory + idb only. One contract with
+// three engines behind it is the whole point: a property that memory passes
+// and idb fails IS a mock-hides-reality bug, and it can only be seen when the
+// same assertions run against both. Adding a new engine means one line there,
+// not a second copy here.
+//
+// What stays in this file is everything engine-SPECIFIC: the sqlite RPC
+// lifecycle, the packaging invariant, coordinator×engine wiring, and the
+// SQL-level tests that have no analogue in other engines.
 // ─────────────────────────────────────────────
 // Coordinator × engine option
 // ─────────────────────────────────────────────
