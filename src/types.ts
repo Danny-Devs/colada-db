@@ -460,7 +460,23 @@ export interface EntityStore {
  *   coordinator treats a rejected write as "engine degraded" and disables
  *   itself (the in-memory store keeps working).
  * - `loadAll` may include a per-row `version` (engine write counter,
- *   server timestamp) — the ADR-005 causality slot. Optional.
+ *   server timestamp) — the ADR-005 causality slot. **Optional, and the
+ *   engines genuinely differ**: `memoryEngine` and `sqliteEngine` increment a
+ *   counter per write; `idbEngine` — the DEFAULT engine — does not track one
+ *   at all, so it returns `undefined` (DAN-724, found mechanically by the
+ *   conformance kit 2026-07-30).
+ *
+ *   **A consumer MUST treat an absent `version` as UNKNOWN, never as
+ *   "older".** This is the load-bearing rule, and the hazard runs opposite to
+ *   the usual mock-hides-reality direction: the mock is the CAPABLE one here.
+ *   Code written and tested against `memoryEngine` reads a number, ships, and
+ *   silently receives `undefined` from IndexedDB in production — where a
+ *   naive `a.version > b.version` is `false` for every comparison, so
+ *   arbitration does not fail loudly, it just quietly stops arbitrating.
+ *
+ *   An engine either implements the counter or it does not; a partial counter
+ *   is worse than none. The conformance kit enforces this in BOTH directions
+ *   via its `versioned` capability (`src/engine-conformance.ts`).
  * - Values passed to `writeBatch` have EntityRefs wire-encoded by the
  *   coordinator; USER entity fields pass through untouched. Engines store
  *   and return values opaquely — but their serialization limits leak:
