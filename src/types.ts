@@ -477,6 +477,28 @@ export interface EntityStore {
  *   An engine either implements the counter or it does not; a partial counter
  *   is worse than none. The conformance kit enforces this in BOTH directions
  *   via its `versioned` capability (`src/engine-conformance.ts`).
+ *
+ *   **UNRESOLVED — `version` has no defined SEMANTIC, and the two shipped
+ *   implementations give it the weaker one** (DAN-724, measured 2026-07-30):
+ *
+ *   - *Revision depth* — "this row has been written N times." What
+ *     `memoryEngine` (`(existing?.version ?? 0) + 1`) and the SQLite core
+ *     (`row_version` on upsert) actually store. Row A's `3` and row B's `1`
+ *     are **incomparable**: depth says nothing about which was written first.
+ *   - *Causal stamp* — a value monotonically increasing across ALL writes, so
+ *     any two rows can be ordered. This is what "the ADR-005 causality slot"
+ *     in the sentence above actually describes, and neither engine provides
+ *     it.
+ *
+ *   Do not read `version` as an ordering across different rows today. It is
+ *   only meaningful compared against an EARLIER version of the SAME row.
+ *
+ *   Cost is NOT the blocker on fixing this, contrary to the obvious guess.
+ *   Measured against real IndexedDB: per-row versioning via get-then-put is
+ *   2.2x, via cursor 2.3x (worse), but a single monotonic counter row read
+ *   once per BATCH is 1.0x — free — and yields the causal stamp rather than
+ *   the depth. The open question is which semantic sync needs, which cannot
+ *   be answered until ADR-006's comparator has a signature (DAN-736 item 3).
  * - Values passed to `writeBatch` have EntityRefs wire-encoded by the
  *   coordinator; USER entity fields pass through untouched. Engines store
  *   and return values opaquely — but their serialization limits leak:
