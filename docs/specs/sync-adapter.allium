@@ -1,0 +1,967 @@
+-- allium: 3
+--
+-- colada-db — the SyncAdapter contract (Stage 3 / Phase 5)
+--
+-- Source of truth: docs/adr/006-sync-adapter-interface.md, frozen at rev c
+-- (2026-07-24). This file is a TRANSCRIPTION of that contract into checkable
+-- form, not an improvement on it. Where ADR-006 is deliberately silent, the
+-- silence is recorded in the Open Questions section at the bottom rather than
+-- resolved by invention.
+--
+-- Companion decisions: ADR-003 (memory projection, not store swap), ADR-004
+-- (evict is not delete), ADR-005 (version metadata slot + server-authoritative
+-- posture), ADR-007 (write-channel origins), ADR-014 (provenance, not phase
+-- flags), ADR-022 (the irreversibility lines — the shapes below are a WIRE
+-- PROTOCOL, which is one of the six surfaces that stop being ours once a real
+-- backend speaks them).
+--
+-- Scope discipline: colada-db is a generic OSS local-first library. Nothing in
+-- this file names a consuming application's domain. The adapter moves entities
+-- and knows nothing about what they mean.
+--
+-- Written so that an executable conformance kit — the SyncAdapter sibling of
+-- src/engine-conformance.ts — can be generated from it: every contract
+-- signature is a call a third-party adapter must answer, every @invariant is a
+-- property a spy adapter can witness, and every expression-bearing invariant is
+-- a predicate over state the kit can read after a rule sequence.
+
+------------------------------------------------------------
+-- Given
+------------------------------------------------------------
+
+given {
+    coordinator: SyncCoordinator
+}
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+-- The opaque entity payload. colada-db never inspects its shape; the adapter
+-- never inspects it either. Declared as a placeholder so the contract can name
+-- it without owning it.
+external entity EntityData {}
+
+-- One registered entity type in the consuming app's schema. Governed by the
+-- store's defineEntity surface, not by this spec.
+external entity EntityTypeRegistration {
+    name: String
+    -- ADR-006 §5: device-local types (pagination containers, UI state) are
+    -- excluded from replication. See open question on the flag's spelling.
+    device_local: Boolean
+}
+
+-- A row in the in-memory projection. Governed by the store spec (ADR-003).
+external entity StoredEntity {
+    entity_type_name: String
+    id: String
+    registration: EntityTypeRegistration
+    version: Version?
+    origin: WriteOrigin?
+}
+
+-- The already-shipped optimistic transaction (0.2.0). ADR-006 §1: the outbox
+-- IS this system's durable tail, not a new mechanism.
+external entity OptimisticTransaction {
+    transaction_id: String
+}
+
+-- The consuming application, as a party at the local-write boundary.
+external entity HostApplication {
+    sync_enabled: Boolean
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+-- Backend-supplied ordering token. ADR-005 §1 froze this as opaque and
+-- never fabricated by the store; the wire form is string-or-number. Core must
+-- not apply a relational operator to it — see contract VersionOrdering (C2).
+value Version {
+    token: String
+}
+
+-- Opaque pull position. Adapters may encode structured positions inside it
+-- (Electric-style handle+offset); the coordinator treats it as bytes.
+value Cursor {
+    token: String
+}
+
+-- A change arriving FROM the backend. Deletes are tombstones, never omissions.
+value RemoteChange {
+    op: ChangeOp
+    entity_type: String
+    id: String
+    data: EntityData?          -- absent for remove
+    version: Version           -- authoritative ordering
+}
+
+-- A committed local write heading TO the backend: one outbox entry's payload.
+value LocalChange {
+    mutation_id: String        -- idempotency key; HLC-style time + counter + client
+    client_id: String          -- opaque; see contract ClientIdentity (C3)
+    seq: Integer               -- monotonic per client
+    transaction_id: String?    -- groups a multi-entity optimistic transaction
+    op: ChangeOp
+    entity_type: String
+    id: String
+    data: EntityData?          -- PATCH-style dirty fields preferred over full rows
+    base_version: Version?     -- the version the client last saw
+}
+
+-- One per-mutation verdict inside a PushResult.
+value PushVerdict {
+    mutation_id: String
+    status: VerdictStatus
+    data: EntityData?
+    version: Version?
+    remapped_id: String?       -- temp-ID to server-ID, applied atomically
+}
+
+value PushResult {
+    verdicts: List<PushVerdict>
+}
+
+-- One entry of Replicache-style lastMutationIDChanges: how far this client's
+-- writes are already baked into the snapshot being pulled.
+value ConfirmationMark {
+    client_id: String
+    seq: Integer
+}
+
+-- What pull() is asked for. Deliberately cursor-and-range shaped and nothing
+-- more: there is no predicate field, because a predicate is the thing a server
+-- that cannot decrypt your data can never evaluate (C1).
+value PullSelection {
+    cursor: Cursor?            -- null = initial sync
+    limit: Integer?
+    schema_version: String?
+}
+
+-- The handle returned by the optional live channel.
+value LiveChannel {
+    open: Boolean
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+contract SyncTransport {
+    pull: (selection: PullSelection) -> PullOutcome
+    push: (batch: List<LocalChange>, schema_version: String?) -> PushResult
+    subscribe: (subscription: SyncSubscription) -> LiveChannel
+
+    @invariant PushIsDurableBeforeItResolves
+        -- push MUST NOT resolve until the write is durable in the SAME store
+        -- that pull() reads from. An adapter that resolves on enqueue into an
+        -- asynchronous backend queue breaks sync: the coordinator will pull a
+        -- snapshot that does not contain the write it was just told landed.
+
+    @invariant RejectIsPermanentTransientIsThrown
+        -- A `reject` verdict means PERMANENTLY invalid. Transient failure —
+        -- network, 5xx, timeout, lock contention — is NOT a reject: the adapter
+        -- signals it by failing the push call, and the coordinator retries with
+        -- backoff. An adapter that returns `reject` for a transient condition
+        -- causes permanent, silent data loss of a valid user write.
+
+    @invariant RejectStillAdvancesServerSeq
+        -- On reject the server MUST still advance its per-client seq. If it
+        -- does not, the next push carries a seq the server reads as a gap, and
+        -- the client wedges forever behind a write it can never retract.
+
+    @invariant OrderedDeliveryPerClient
+        -- Batches are delivered in seq order per client_id. The server ignores
+        -- any seq <= lastSeen (idempotent replay) and rejects gaps.
+
+    @invariant ReplayIsIdempotent
+        -- Re-delivering a batch whose mutation_ids the server has already
+        -- applied produces the same verdicts and no second application. This is
+        -- what makes the retry in RejectIsPermanentTransientIsThrown safe.
+
+    @invariant SelectionIsCursorAndRangeShaped
+        -- ADR-006 rev c, C1 — the sharpest one-way door. pull() takes a cursor,
+        -- a limit and a schema version. It does NOT take a server-evaluated
+        -- predicate. An adapter is free to evaluate shapes over plaintext
+        -- INSIDE itself (that is what an Electric adapter does); it must never
+        -- require the coordinator to express selection as a predicate, because
+        -- a relay that cannot decrypt the data can never evaluate one, and no
+        -- future adapter recovers the property once core depends on it.
+
+    @invariant LiveChannelIsOptionalPokeFirstAndLossy
+        -- subscribe is optional. When present it is a bare hint that triggers
+        -- pull(); inline data is an optimization, not a delivery guarantee. The
+        -- stream is licensed to drop events — a reset directive on the pull
+        -- channel is the recovery path. The returned LiveChannel is disposable
+        -- and closing it must stop delivery.
+
+    @invariant TombstonesNotOmissions
+        -- A deletion arrives as an explicit `remove` change. Hard deletes with
+        -- no tombstone are unsyncable: an absent row is indistinguishable from
+        -- a row outside the current selection.
+
+    @guidance
+        -- The reference implementation is restAdapter, and the documented
+        -- protocol is the deliverable — every adapter after it competes beneath
+        -- this contract rather than replacing it. Keep pull() genuinely
+        -- side-effect-free with cursor and predicate in the request body rather
+        -- than the path (ADR-006 C5), so HTTP QUERY (RFC 10008) is a drop-in
+        -- when rollout lands. Do not depend on QUERY yet.
+}
+
+contract VersionOrdering {
+    compare_versions: (left: Version, right: Version) -> VersionOrder
+
+    @invariant ComparatorIsTheOnlyOrdering
+        -- ADR-006 rev c, C2. Every "is this newer" decision in the coordinator
+        -- routes through this single adapter-supplied seam. No relational
+        -- operator is ever applied to a Version token anywhere in core. Each
+        -- such site would otherwise have to change the day an adapter needs a
+        -- partial order.
+
+    @invariant DefaultIsNumericThenLexicographic
+        -- An adapter that supplies no comparator gets the default: numeric when
+        -- both tokens parse as numbers, lexicographic otherwise. Overriding it
+        -- is the adapter's choice, not core's.
+
+    @invariant CoreNeverInterpretsTheToken
+        -- A vector clock, a Lamport-plus-actor pair or a signed blob may be
+        -- smuggled into the token. Core must not parse, validate, truncate or
+        -- reformat it.
+}
+
+contract ClientIdentity {
+    client_id: () -> String
+
+    @invariant OpaqueToCore
+        -- ADR-006 rev c, C3. client_id is an opaque string. Core never
+        -- generates one, never validates its format, and never assumes it is
+        -- server-assigned, sequentially allocated or unique by fiat. A
+        -- decentralized adapter must be free to put a public-key fingerprint
+        -- there, because with no server there is nobody to vouch for identity.
+
+    @invariant StablePerClient
+        -- The value is stable for the lifetime of a client and shared across a
+        -- tab group, so that (client_id, seq) keys the outbox durably across
+        -- reloads and crashes.
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum ChangeOp { set | remove }
+
+enum VerdictStatus { ack | reject | transform }
+
+enum VersionOrder { older | same | newer }
+
+-- ADR-007 §1 write-channel vocabulary, restricted to the two origins this
+-- boundary cares about. Echo suppression is by provenance (ADR-014).
+enum WriteOrigin { local_mutation | remote }
+
+enum ExclusionReason { device_local | cache_eviction | local_reset }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- One installed transport. Three methods; the coordinator does the rest.
+entity SyncAdapter {
+    name: String
+    is_installed: Boolean
+    provides_live_channel: Boolean
+
+    subscriptions: SyncSubscription with adapter = this
+}
+
+-- The module singleton: what the coordinator owns across all adapters.
+entity SyncCoordinator {
+    client_id: String
+    next_seq: Integer
+
+    outbox: OutboxEntry with coordinator = this
+    pending_outbox: outbox where status in {pending, in_flight}
+    unconfirmed_outbox: outbox where status = awaiting_confirmation
+}
+
+-- One replicated partition, pulled over one cursor.
+entity SyncSubscription {
+    adapter: SyncAdapter
+    selection: PullSelection
+    cursor: Cursor?
+    status: idle | pulling | staging | applying | resetting | stopped
+    pending_batch_complete: Boolean
+    reset_at: Timestamp?
+
+    transitions status {
+        idle -> pulling
+        pulling -> staging
+        staging -> pulling
+        pulling -> applying
+        pulling -> resetting
+        applying -> idle
+        applying -> resetting
+        resetting -> idle
+        idle -> stopped
+        terminal: stopped
+    }
+}
+
+-- A committed local write awaiting the backend's verdict. ADR-006 §1: this is
+-- the existing optimistic-transaction system's durable tail, persisted through
+-- the StorageEngine in a SEPARATE store from entity state.
+entity OutboxEntry {
+    coordinator: SyncCoordinator
+    adapter: SyncAdapter
+    change: LocalChange
+    -- Groups the entries of one multi-entity optimistic transaction, so the
+    -- backend can apply them atomically.
+    transaction: OptimisticTransaction?
+    entity_type: EntityTypeRegistration
+    entity_id: String
+    client_id: String
+    seq: Integer
+    mutation_id: String
+    origin: WriteOrigin
+    status: pending | in_flight | awaiting_confirmation | confirmed | rejected
+    attempts: Integer
+    retry_at: Timestamp?
+    server_version: Version?
+    -- Set only by the pull channel. The whole point of ADR-006 §1b is that no
+    -- other code path may set it.
+    confirmed_by_pull: Boolean
+
+    ready_to_push: status = pending and (retry_at = null or retry_at <= now)
+
+    transitions status {
+        pending -> in_flight
+        in_flight -> pending
+        in_flight -> awaiting_confirmation
+        in_flight -> rejected
+        awaiting_confirmation -> confirmed
+        terminal: confirmed, rejected
+    }
+
+    invariant NeverCarriesRemoteProvenance {
+        origin = local_mutation
+    }
+
+    invariant DeviceLocalTypesNeverEnterTheOutbox {
+        not entity_type.device_local
+    }
+}
+
+-- What pull() returned. Either a batch of changes over a cursor, or an order to
+-- discard the partition and start over.
+entity PullOutcome {
+    subscription: SyncSubscription
+    kind: ChangeBatch | ResetDirective
+}
+
+variant ChangeBatch : PullOutcome {
+    changes: List<RemoteChange>
+    batch_cursor: Cursor
+    -- false = more batches follow; the coordinator STAGES and applies only at
+    -- complete, so a partial snapshot is never observable to the app.
+    complete: Boolean
+    confirmed_mutations: List<ConfirmationMark>
+    checksum: String?
+}
+
+-- Cursor expired, compaction, DDL change or detected corruption. Discard the
+-- partition and resync. Applied per subscription with jitter, never as a global
+-- storm.
+variant ResetDirective : PullOutcome {
+    resume_cursor: Cursor?
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+-- Every value below is a DEFAULT CHOSEN HERE, not a value ADR-006 specifies.
+-- Each has a matching open question at the bottom of this file.
+config {
+    pull_batch_limit: Integer = 500
+    push_retry_initial_backoff: Duration = 1.seconds
+    push_retry_max_backoff: Duration = 60.seconds
+    reset_resync_jitter: Duration = 30.seconds
+    checksum_verification_enabled: Boolean = false
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ── Local write path: what enters the outbox, and what never does ──────────
+
+rule EnqueueCommittedMutation {
+    when: LocalMutationCommitted(app, transaction, entity_type, entity_id, op, data)
+    requires: not entity_type.device_local
+    requires: op in {set, remove}
+    ensures:
+        OutboxEntry.created(
+            coordinator: coordinator,
+            entity_type: entity_type,
+            entity_id: entity_id,
+            client_id: coordinator.client_id,
+            seq: coordinator.next_seq,
+            origin: local_mutation,
+            status: pending,
+            attempts: 0,
+            confirmed_by_pull: false
+        )
+        coordinator.next_seq = coordinator.next_seq + 1
+
+    @guidance
+        -- mutation_id is HLC-shaped (time + counter + client_id): unique AND
+        -- ordered, so it doubles as the server's idempotency key and as a
+        -- tiebreak. The commit of an optimistic transaction is what moves its
+        -- mutations here; nothing else writes to the outbox.
+}
+
+rule DeviceLocalMutationIsNotReplicated {
+    when: LocalMutationCommitted(app, transaction, entity_type, entity_id, op, data)
+    requires: entity_type.device_local
+    ensures: MutationExcludedFromSync(
+        entity_type: entity_type,
+        entity_id: entity_id,
+        reason: device_local
+    )
+}
+
+rule EvictionIsNotADeletion {
+    when: StoreEvicted(app, entity_type, entity_id)
+    ensures: MutationExcludedFromSync(
+        entity_type: entity_type,
+        entity_id: entity_id,
+        reason: cache_eviction
+    )
+
+    @guidance
+        -- ADR-004 at the sync boundary. `evict` drops a row from the memory
+        -- projection only; it is cache management, and replicating it would
+        -- delete the entity on every other device. There is no evict value in
+        -- ChangeOp — the exclusion is structural, not a runtime check.
+}
+
+rule LocalResetIsNotAFleetDeletion {
+    when: StoreCleared(app)
+    ensures: LocalResetNotReplicated(coordinator: coordinator, reason: local_reset)
+
+    @guidance
+        -- clear() does not push deletes by default: a local reset (logout,
+        -- account switch, test teardown) is not an instruction to the fleet.
+        -- Fleet-wide deletion goes through ordinary removes.
+}
+
+-- ── Push path: ordered delivery, per-change verdicts ───────────────────────
+
+rule DispatchReadyOutboxEntry {
+    when: entry: OutboxEntry.ready_to_push
+    requires: entry.status = pending
+    ensures:
+        entry.status = in_flight
+        PushDispatched(
+            adapter: entry.adapter,
+            client_id: entry.client_id,
+            seq: entry.seq,
+            mutation_id: entry.mutation_id
+        )
+}
+
+rule AckRecordsWatermarkOnly {
+    when: AdapterDeliversVerdict(adapter, entry, verdict)
+    requires: entry.status = in_flight
+    requires: verdict.status = ack
+    ensures:
+        entry.status = awaiting_confirmation
+        entry.server_version = verdict.version
+
+    @guidance
+        -- ADR-006 §1b, and the single most load-bearing rule in the push path.
+        -- An ack records a server watermark. It does NOT drop the optimistic
+        -- overlay. Dropping on ack is what produces the push-ack/pull-snapshot
+        -- double-apply race and the ack-then-catch-up rubber-band flicker.
+}
+
+rule RejectIsPermanent {
+    when: AdapterDeliversVerdict(adapter, entry, verdict)
+    requires: entry.status = in_flight
+    requires: verdict.status = reject
+    ensures:
+        entry.status = rejected
+        OptimisticOverlayReverted(entry: entry)
+
+    @guidance
+        -- Permanently invalid: drop the outbox entry and revert the overlay
+        -- through the existing rollback machinery. The server's obligation to
+        -- advance its per-client seq anyway lives in contract SyncTransport
+        -- (RejectStillAdvancesServerSeq) because only the backend can honour it.
+}
+
+rule TransformRebasesTheWrite {
+    when: AdapterDeliversVerdict(adapter, entry, verdict)
+    requires: entry.status = in_flight
+    requires: verdict.status = transform
+    ensures:
+        entry.status = awaiting_confirmation
+        entry.server_version = verdict.version
+        ServerCorrectionApplied(entry: entry, data: verdict.data)
+        if verdict.remapped_id != null:
+            EntityRekeyed(
+                entry: entry,
+                from_id: entry.entity_id,
+                to_id: verdict.remapped_id
+            )
+
+    @guidance
+        -- The server rebased the write. The corrected entity replaces the
+        -- optimistic one, and an id remap (temp-ID to server-ID) is applied
+        -- ATOMICALLY: rekey the entity, rewrite outbox references, emit one
+        -- move event. Partial application here is observable as a duplicate.
+        -- Whether transform also waits for pull confirmation is an open
+        -- question below; this rule takes the §1b path.
+}
+
+rule TransientFailureRetriesWithBackoff {
+    when: AdapterReportsTransientFailure(adapter, entry)
+    requires: entry.status = in_flight
+    ensures:
+        entry.status = pending
+        entry.attempts = entry.attempts + 1
+        entry.retry_at = now + backoff_delay(
+            entry.attempts,
+            config.push_retry_initial_backoff,
+            config.push_retry_max_backoff
+        )
+
+    @guidance
+        -- A thrown push is NOT a reject. The entry stays in the outbox, the
+        -- overlay stays on screen, and the coordinator retries. This is the
+        -- distinction the error-taxonomy work (a ColadaDbError with codes) has
+        -- to preserve when it lands: a typed error is the machine-readable form
+        -- of "transient", and mapping any transient code onto `reject` would
+        -- silently destroy valid user writes.
+}
+
+rule RecoverStrandedOutboxOnBoot {
+    when: CoordinatorBooted(coordinator)
+    for entry in OutboxEntries where status = in_flight:
+        ensures: entry.status = pending
+
+    @guidance
+        -- ADR-006 §1c. Outbox entries are keyed (client_id, seq), so a booting
+        -- client may find and re-push a crashed or frozen sibling tab's
+        -- stranded entries without losing writes. It is safe because the server
+        -- dedups by per-client seq. See the open question about what adopting a
+        -- sibling's client_id means once client_id is a public key.
+}
+
+-- ── Confirmation: the overlay is dropped on the PULL channel, never on ack ──
+
+rule ConfirmOnPulledMutationMark {
+    when: PullSnapshotConfirmed(subscription, entry, mark)
+    requires: entry.status = awaiting_confirmation
+    requires: entry.client_id = mark.client_id
+    requires: entry.seq <= mark.seq
+    ensures:
+        entry.status = confirmed
+        entry.confirmed_by_pull = true
+        OptimisticOverlayDropped(entry: entry)
+}
+
+rule ConfirmOnPulledCheckpoint {
+    when: PullCheckpointReached(subscription, entry, checkpoint_version)
+    requires: entry.status = awaiting_confirmation
+    requires: entry.server_version != null
+    requires: compare_version(checkpoint_version, entry.server_version) != older
+    ensures:
+        entry.status = confirmed
+        entry.confirmed_by_pull = true
+        OptimisticOverlayDropped(entry: entry)
+
+    @guidance
+        -- The second of §1b's two confirmation paths: a pulled checkpoint at or
+        -- past the ack's server watermark confirms the write even when the
+        -- snapshot carried no per-mutation marks. Note the version comparison
+        -- goes through the adapter's comparator, not through `>=`.
+}
+
+-- ── Pull path: cursor-based, batched, resumable, staged until complete ─────
+
+rule BeginPull {
+    when: PullRequested(subscription)
+    requires: subscription.status = idle
+    ensures:
+        subscription.status = pulling
+        PullDispatched(
+            adapter: subscription.adapter,
+            client_id: coordinator.client_id,
+            seq: 0,
+            mutation_id: ""
+        )
+        PullSelectionIssued(
+            subscription: subscription,
+            cursor: subscription.cursor,
+            limit: config.pull_batch_limit
+        )
+
+    @guidance
+        -- A null cursor means initial sync. The selection carries a cursor and
+        -- a limit and nothing else — see contract SyncTransport's
+        -- SelectionIsCursorAndRangeShaped for why there is no predicate here.
+}
+
+rule ResumeStagedPull {
+    when: PullRequested(subscription)
+    requires: subscription.status = staging
+    ensures:
+        subscription.status = pulling
+        PullSelectionIssued(
+            subscription: subscription,
+            cursor: subscription.cursor,
+            limit: config.pull_batch_limit
+        )
+}
+
+rule PokeTriggersPull {
+    when: AdapterEmitsPoke(adapter)
+    requires: adapter.provides_live_channel
+    for subscription in adapter.subscriptions where status = idle:
+        ensures: PullRequested(subscription: subscription)
+
+    @guidance
+        -- Poke-first. The live channel says "something changed"; the pull
+        -- channel says what. Inline data on the stream is an optimization and
+        -- the stream is allowed to drop events, so nothing here may be the only
+        -- delivery path for a change.
+}
+
+rule StageIncompletePullBatch {
+    when: AdapterDeliversPullOutcome(adapter, subscription, outcome)
+    requires: subscription.status = pulling
+    requires: outcome.kind = ChangeBatch
+    requires: not outcome.complete
+    ensures:
+        subscription.status = staging
+        subscription.cursor = outcome.batch_cursor
+        subscription.pending_batch_complete = false
+        PullRequested(subscription: subscription)
+
+    @guidance
+        -- The cursor is persisted per batch, so an interrupted multi-batch pull
+        -- resumes where it stopped instead of restarting. The staged changes are
+        -- NOT applied — a half-applied snapshot is a corrupt one.
+}
+
+rule ApplyCompletePullBatch {
+    when: AdapterDeliversPullOutcome(adapter, subscription, outcome)
+    requires: subscription.status = pulling
+    requires: outcome.kind = ChangeBatch
+    requires: outcome.complete
+    ensures:
+        subscription.status = applying
+        subscription.cursor = outcome.batch_cursor
+        subscription.pending_batch_complete = true
+        for change in outcome.changes:
+            RemoteChangeReceived(subscription: subscription, change: change)
+        PullBatchApplied(subscription: subscription, outcome: outcome)
+}
+
+rule ResetOnAdapterDirective {
+    when: AdapterDeliversPullOutcome(adapter, subscription, outcome)
+    requires: subscription.status = pulling
+    requires: outcome.kind = ResetDirective
+    ensures:
+        subscription.status = resetting
+        subscription.cursor = outcome.resume_cursor
+        subscription.reset_at = now
+        PartitionDiscarded(subscription: subscription)
+
+    @guidance
+        -- Cursor expiry, compaction, a DDL change or detected corruption. The
+        -- entity partition is discarded and resynced. The OUTBOX is not: it
+        -- lives in a separate durable store precisely so a state reset can
+        -- never destroy unpushed writes.
+}
+
+rule ResetOnChecksumMismatch {
+    when: PullBatchApplied(subscription, outcome)
+    requires: subscription.status = applying
+    requires: outcome.kind = ChangeBatch
+    requires: config.checksum_verification_enabled
+    requires: outcome.checksum != null
+    requires: not checksum_matches(outcome.checksum, subscription)
+    ensures:
+        subscription.status = resetting
+        subscription.reset_at = now
+        PartitionDiscarded(subscription: subscription)
+}
+
+rule CompleteApplyAndConfirm {
+    when: PullBatchApplied(subscription, outcome)
+    requires: subscription.status = applying
+    requires: outcome.kind = ChangeBatch
+    requires:
+        not config.checksum_verification_enabled
+        or outcome.checksum = null
+        or checksum_matches(outcome.checksum, subscription)
+    ensures:
+        subscription.status = idle
+        for mark in outcome.confirmed_mutations:
+            for entry in OutboxEntries
+                where client_id = mark.client_id and seq <= mark.seq:
+                PullSnapshotConfirmed(
+                    subscription: subscription,
+                    entry: entry,
+                    mark: mark
+                )
+}
+
+rule ResyncAfterResetWithJitter {
+    when: subscription: SyncSubscription.reset_at + config.reset_resync_jitter <= now
+    requires: subscription.status = resetting
+    ensures:
+        subscription.status = idle
+        PullRequested(subscription: subscription)
+
+    @guidance
+        -- Jittered and per subscription. A reset that fires simultaneously
+        -- across every partition is a thundering herd aimed at the backend that
+        -- just told you it was in trouble.
+}
+
+rule StopSubscription {
+    when: SyncDisabled(app, subscription)
+    requires: subscription.status = idle
+    ensures:
+        subscription.status = stopped
+        LiveChannelClosed(subscription: subscription)
+}
+
+-- ── Applying remote changes: version-aware, under remote provenance ────────
+
+rule ApplyNewerRemoteChange {
+    when: RemoteChangeReceived(subscription, change)
+    let current = StoredEntity{entity_type_name: change.entity_type, id: change.id}
+    requires:
+        not exists current
+        or current.version = null
+        or compare_version(change.version, current.version) = newer
+    ensures: RemoteChangeApplied(
+        subscription: subscription,
+        change: change,
+        origin: remote
+    )
+
+    @guidance
+        -- ADR-006 §2 and §3 together. The change is applied under a `remote`
+        -- provenance stamp (ADR-014), which is what keeps it from re-entering
+        -- the outbox as though the user had typed it — echo suppression by
+        -- construction rather than by a phase flag. And it is applied only if
+        -- the comparator says it is newer, upgrading ADR-005's fresh-wins from
+        -- existence-based to version-based. A `remove` change is a SEMANTIC
+        -- delete (store.remove, durable row deleted), never an evict.
+}
+
+rule SkipStaleRemoteChange {
+    when: RemoteChangeReceived(subscription, change)
+    let current = StoredEntity{entity_type_name: change.entity_type, id: change.id}
+    requires: exists current
+    requires: current.version != null
+    requires: compare_version(change.version, current.version) != newer
+    ensures: RemoteChangeSkipped(subscription: subscription, change: change)
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+-- Idempotency. The mutation_id is the server's dedup key; two outbox entries
+-- sharing one would make replay indistinguishable from a second write.
+invariant UniqueMutationIdentity {
+    for a in OutboxEntries:
+        for b in OutboxEntries:
+            a != b implies a.mutation_id != b.mutation_id
+}
+
+-- Recovery keying (ADR-006 §1c). A sibling client's stranded outbox can only be
+-- adopted safely if (client_id, seq) identifies an entry uniquely. This is also
+-- the property that must survive C3: it holds whatever a client_id turns out to
+-- be, including a public key, because nothing here reads inside the string.
+invariant OutboxIsKeyedByClientAndSeq {
+    for a in OutboxEntries:
+        for b in OutboxEntries:
+            a != b implies (a.client_id != b.client_id or a.seq != b.seq)
+}
+
+-- ADR-006 §1b, stated as state rather than as sequence: an entry can only be in
+-- the confirmed state if the pull channel put it there. This is the assertion a
+-- conformance kit checks after driving ack-without-pull.
+invariant OverlayIsDroppedOnlyByThePullChannel {
+    for entry in OutboxEntries:
+        entry.status = confirmed implies entry.confirmed_by_pull
+}
+
+-- ADR-006's staging rule: while a multi-batch pull is in progress the partition
+-- has not been declared complete, so nothing from it is applied.
+invariant StagedBatchesAreNotApplied {
+    for subscription in SyncSubscriptions:
+        subscription.status = staging implies not subscription.pending_batch_complete
+}
+
+-- A stopped subscription holds no cursor obligation and issues no pulls.
+invariant StoppedSubscriptionsAreQuiescent {
+    for subscription in SyncSubscriptions:
+        subscription.status = stopped implies subscription.reset_at = null
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+-- The external party at the transport boundary is code, not a person.
+actor AdapterImplementation {
+    identified_by: SyncAdapter where is_installed
+}
+
+actor Application {
+    identified_by: HostApplication where sync_enabled
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface SyncTransportBoundary {
+    facing adapter: AdapterImplementation
+
+    exposes:
+        adapter.name
+        adapter.provides_live_channel
+        for subscription in adapter.subscriptions:
+            subscription.cursor
+            subscription.status
+
+    provides:
+        AdapterDeliversPullOutcome(adapter, subscription, outcome)
+        AdapterDeliversVerdict(adapter, entry, verdict)
+        AdapterReportsTransientFailure(adapter, entry)
+        AdapterEmitsPoke(adapter) when adapter.provides_live_channel
+
+    contracts:
+        demands SyncTransport
+        demands VersionOrdering
+        demands ClientIdentity
+
+    @guarantee ServerIsAuthoritative
+        -- ADR-006 §6. The server's verdict is final; the client rebases
+        -- in-flight optimistic transactions on the post-apply state by
+        -- clear-and-replay, which the transaction system already implements.
+        -- No CRDTs, no peer-to-peer merge — deliberately (ADR-005 §3). The
+        -- posture lives in the ADAPTER, not in the store: an end-to-end
+        -- encrypted relay adapter simply never emits a transform verdict, and
+        -- the coordinator already handles adapters that do not.
+
+    @guarantee SelectionStaysClientSideExpressible
+        -- Door-keeping constraint C1. Server-evaluated shapes are permitted
+        -- INSIDE an adapter and nowhere else. The coordinator's model of "what
+        -- do I have, what am I missing" stays cursor-and-range shaped.
+
+    @guarantee VersionOrderingIsDelegated
+        -- Door-keeping constraint C2. Every ordering decision crosses this
+        -- boundary through compare_versions. Core contains no comparison of
+        -- version tokens.
+
+    @guarantee ClientIdentityIsOpaque
+        -- Door-keeping constraint C3. client_id crosses the boundary as bytes.
+        -- Core neither mints nor inspects it.
+
+    @guarantee EvictNeverCrossesTheBoundary
+        -- ADR-004. ChangeOp has no evict value. Local cache management is
+        -- structurally incapable of instructing the fleet to delete data.
+
+    @guarantee EchoSuppressionByProvenance
+        -- Remote changes are applied under a remote origin stamp, so they can
+        -- never re-enter the outbox and bounce back to the server.
+
+    @guidance
+        -- Adapter roadmap (ADR-006 rev c): restAdapter, then an Electric
+        -- read-path adapter that fills pull() and subscribe() and leaves push()
+        -- to the outbox, then re-evaluate. Most sync engines in the field own
+        -- their own client store and upload queue, which makes them rivals to
+        -- this library rather than transports beneath it.
+}
+
+surface LocalWriteBoundary {
+    facing app: Application
+
+    provides:
+        LocalMutationCommitted(app, transaction, entity_type, entity_id, op, data)
+        StoreEvicted(app, entity_type, entity_id)
+        StoreCleared(app)
+        SyncDisabled(app, subscription)
+        CoordinatorBooted(coordinator)
+
+    @guarantee BootIsARecoveryPoint
+        -- Boot is a boundary event, not an internal one: it is the moment a
+        -- client may adopt the stranded outbox of a crashed sibling tab.
+
+    @guarantee OutboxSurvivesStateReset
+        -- The outbox is persisted through the StorageEngine in a SEPARATE
+        -- file or store from entity state, so neither a local clear() nor a
+        -- server-directed partition reset can destroy an unpushed write.
+
+    @guarantee ClearDoesNotPushDeletes
+        -- A local reset is not an instruction to the fleet.
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+-- Each entry below is a place ADR-006 rev c is silent or reads two ways. None
+-- is resolved here. Section references are to ADR-006 unless stated.
+
+open question "Transform and the overlay: does a `transform` verdict complete the write immediately (§1: 'applies the server's corrected entity and any id remap then completes') or does it await pull confirmation like `ack` (§1b: the overlay is dropped only when a pulled snapshot confirms it)? The two sections read differently and this spec takes the §1b path."
+
+open question "Comparator result shape (rev c C2): C2 requires the version seam to be able to express a PARTIAL order for CRDT causality, but a three-valued older/same/newer result cannot signal 'concurrent'. ADR-006 does not give compare_versions a signature or say how concurrency is represented."
+
+open question "The checkpoint channel does not exist in the frozen types. §1b gives two confirmation paths — confirmedMutations marks, OR 'a pulled checkpoint >= the ack's serverVersion' — but PullResult carries no checkpoint or watermark field. The second path has no wire representation, so as frozen only the first is implementable."
+
+open question "What a subscription IS. §PullResult speaks of per-subscription checksums and per-subscription reset with jitter, but the frozen three-method interface has no subscription parameter — pull(cursor, opts) is global. The partition unit, how many exist, how one is created and how a cursor maps to one are undefined."
+
+open question "pull() limit: `opts.limit?: number` is declared with no default, no ceiling and no statement of what an adapter should do when it is omitted or exceeds what the backend will serve."
+
+open question "Transient-failure retry policy: §PushResult says the coordinator 'retries with backoff' but specifies no schedule, no attempt ceiling, and no poison-message or dead-letter behaviour for an entry that fails transiently forever."
+
+open question "Reset jitter: §PullResult requires per-subscription reset 'with jitter, never a global storm' but gives no window, distribution or bound."
+
+open question "Checksum defaults: ADR-006 names 'per-subscription checksum defaults' as an unresolved implementation-time question in its own Consequences section. Whether verification is on by default, and what a mismatch costs, is unstated."
+
+open question "Named-mutator rebase: ADR-006 Consequences lists `{name, args}` on LocalChange (Zero-style shared mutators) as an open item. LocalChange as frozen carries data, not an intent."
+
+open question "Priority-tiered hydration: named as open in ADR-006 Consequences. PullResult has no priority field and the coordinator has no notion of tiers."
+
+open question "schemaVersion behaviour: rev b added schemaVersion to both pull() and push() opts, but ADR-006 never says what the client does when the backend reports or requires a different schema version — reset, refuse to push, or fail the call."
+
+open question "Reset and in-flight mutations: §1 guarantees the outbox survives a local state reset, but does not say whether a server-directed `reset` invalidates in-flight mutation_ids and seqs, or whether the client resumes pushing the same seq range afterwards."
+
+open question "Id remap fan-out: `transform` may remap a temp id to a server id and 'rewrite outbox refs'. ADR-006 does not say whether base_version on dependent queued entries is also rewritten, nor what happens when a dependent entry was already pushed under the old id."
+
+open question "Tombstone retention: `remove` is a tombstone and hard deletes are unsyncable, but ADR-006 gives no retention obligation — how long a backend must keep tombstones, and whether compaction that drops them must force a reset."
+
+open question "Inline data on the live channel: subscribe() may emit a full PullResult including `reset`. ADR-006 does not say whether inline changes may be applied without the cursor bookkeeping of pull(), nor whether an inline reset is trusted without a pull round-trip."
+
+open question "Sibling-outbox adoption vs opaque identity (§1c against rev c C3): a booting client may push another client's stranded outbox entries, which are stamped with that client's client_id. If client_id becomes a public key, the adopting client cannot authenticate as its owner. ADR-006 does not reconcile the recovery mechanism with the identity constraint."
+
+open question "Push concurrency: 'ordered outbox delivery' plus 'server ignores seq <= lastSeen, rejects gaps' implies serialization, but ADR-006 does not state whether more than one push may be in flight per client, nor whether push and pull may overlap."
+
+open question "Origin stamp spelling: §2 names a `remote` origin stamp, while the shipped WriteOrigin vocabulary in src/types.ts names `sync-pull` for exactly this channel. Which is normative is unresolved; this spec follows ADR-006."
+
+open question "Device-local flag spelling: §5 excludes device-local types via `sync: false` on defineEntity, while the shipped EntityDefinition carries `local?: boolean`. The behaviour is agreed; the name is not."
+
+open question "Unregistered or device-local entity types arriving on the pull channel: ADR-006 says nothing about what the coordinator does when a RemoteChange names a type the client has not registered, or one the client considers device-local."
