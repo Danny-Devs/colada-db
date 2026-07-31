@@ -38,8 +38,9 @@ load-bearing here, so it is stated.
 answer lives, and "CI was red" is a valid, sufficient objection to any change. It
 is not yet the *enforcer* of green.
 
-**What makes it binding.** When the repo goes public (Phase 4 of
-`../ROADMAP-TO-PUBLISH.md`) or the account moves to a plan with branch
+**What makes it binding.** When the repo goes public (Phase 4 — DAN-667; the
+roadmap file this once cited was deleted 2026-07-30, see ADR-022 and the
+planning folder's `AGENTS.md`) or the account moves to a plan with branch
 protection, add a ruleset on `main` requiring these checks by their exact job
 names:
 
