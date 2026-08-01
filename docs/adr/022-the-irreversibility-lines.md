@@ -117,8 +117,16 @@ specified **fully and revisably**, never left deliberately vague.
 - **DAN-724** — decide line 1's `version` question before the IndexedDB format
   is frozen at publish: implement in `idbEngine`, or state in the contract that
   absence means "unknown" and must never be read as "older."
-- **Line 2** has no api-report snapshot yet. Until one exists, "did the public
+- ~~**Line 2** has no api-report snapshot yet. Until one exists, "did the public
   surface change?" is answered by review rather than by a diff — which is the
-  same class of weakness ADR-021 records for CI. Tracked under Phase 4.
+  same class of weakness ADR-021 records for CI. Tracked under Phase 4.~~
+  **[RESOLVED 2026-08-01]** — `etc/colada-db.api.md`, generated and diffed by
+  `scripts/check-api-report.mjs`, wired into `prepublishOnly` and the CI
+  `publish-surface` job. Comments are stripped so a JSDoc edit does not churn
+  the report; every signature, optional marker and barrel entry is compared
+  verbatim. Watched to fail before being trusted: 7/7 selftest, then a real
+  removed export (`memoryEngine`) caught and named at the exact line.
+  *(Struck rather than deleted — ADRs here are append-only, and an Open item
+  that silently vanishes is indistinguishable from one nobody did.)*
 - **DAN-733** — the publish flip crosses lines 1, 2, 3 and 6 simultaneously.
   Suggested order: DAN-724 decided → api-report snapshot exists → publish.

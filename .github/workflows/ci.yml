@@ -176,6 +176,15 @@ jobs:
       - name: Assert publish surface
         run: node scripts/check-publish-surface.mjs
 
+      # ADR-022 line 2 — the public API surface. Separate from the gate above:
+      # that one asserts the emitted types are framework-FREE (ADR-019), which a
+      # surface can satisfy perfectly while having silently dropped an export.
+      # This one diffs the surface itself against a committed report, so
+      # "did the public surface change?" is answered by a diff rather than by
+      # whether a reviewer happened to look.
+      - name: Assert the public API report
+        run: node scripts/check-api-report.mjs
+
       # Independent cross-check: same four invariants, different tool, literal
       # hardcoded paths. Not redundant with the step above — the Node script's
       # positive controls prove each DETECTOR can fire, but cannot catch the
