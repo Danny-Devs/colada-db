@@ -91,8 +91,28 @@ interface Model {
   mem: Map<string, EntityRecord>;
   disk: Map<string, EntityRecord>;
   refs: Map<string, number>;
-  /** At most one open transaction; holds pre-transaction truth for rollback. */
-  tx: { snapshot: Map<string, EntityRecord | undefined> } | null;
+  /**
+   * At most one open transaction.
+   *
+   * `snapshot` holds pre-transaction truth for rollback. `buffer` holds the
+   * transaction's OWN net effect per key — the model's mirror of `persist.ts`'s
+   * `pendingTx`, and the thing commit graduates.
+   *
+   * The buffer is not a convenience. Commit used to derive durable truth from
+   * memory residency (`m.mem.get(key)`), which conflates "evicted" with
+   * "deleted" — and `gc()` is the one command with no `txHolds` guard, because
+   * it takes no key and cannot have one. So a `gc()` landing between `tx.set`
+   * and `tx.commit` made the oracle drop a confirmed write that the real store
+   * correctly kept (DAN-749, seed 379607583). `persist.ts` never had this bug:
+   * evict returns early and leaves the durability pipeline alone, because
+   * "eviction has no authority over the durability pipeline" (ADR-013, after
+   * the DAN-621 resurrection bug). Encoding the buffer here encodes that
+   * CONTRACT — it is not agreement-by-construction with the implementation.
+   */
+  tx: {
+    snapshot: Map<string, EntityRecord | undefined>;
+    buffer: Map<string, EntityRecord>;
+  } | null;
 }
 
 function freshModel(): Model {
@@ -445,13 +465,20 @@ class TxSetCmd implements Cmd {
     const key = keyOf(this.addr);
     if (!r.tx) {
       r.tx = createOptimisticUpdates(r.store).transaction();
-      m.tx = { snapshot: new Map() };
+      m.tx = { snapshot: new Map(), buffer: new Map() };
     }
     if (!m.tx!.snapshot.has(key)) m.tx!.snapshot.set(key, m.mem.get(key));
     r.tx.set(this.addr.entityType, this.addr.id, this.data);
     // Optimistic writes land in memory immediately and touch NOTHING durable
     // until commit — `disk` is deliberately untouched here.
-    m.mem.set(key, mergedInto(m.mem.get(key), this.data));
+    const next = mergedInto(m.mem.get(key), this.data);
+    m.mem.set(key, next);
+    // ...but they ARE recorded, in the transaction's own buffer. This mirrors
+    // `persist.ts`'s `pendingTx`: "optimistic writes parked here until
+    // settlement; commit graduates a buffer into the dirty sets". Recording it
+    // here — rather than re-reading memory at commit — is what makes the
+    // oracle survive a `gc()` arriving before the commit.
+    m.tx!.buffer.set(key, next);
     assertMemoryAgrees(m, r, this.toString());
   }
   toString(): string {
@@ -466,11 +493,15 @@ class TxCommitCmd implements Cmd {
   async run(m: Model, r: Real): Promise<void> {
     executed.commands++;
     r.tx!.commit();
-    // Commit graduates the transaction's net effect into durable truth.
-    for (const key of m.tx!.snapshot.keys()) {
-      const live = m.mem.get(key);
-      if (live === undefined) m.disk.delete(key);
-      else m.disk.set(key, live);
+    // Commit graduates the transaction's OWN BUFFER into durable truth —
+    // never memory residency. Reading `m.mem` here was DAN-749: a `gc()`
+    // between the write and the commit evicts the key, memory reads
+    // `undefined`, and the oracle concludes DELETED and drops a confirmed
+    // write. Eviction has no authority over the durability pipeline
+    // (ADR-013); a committed write is durable whether or not the entity is
+    // still resident.
+    for (const [key, value] of m.tx!.buffer) {
+      m.disk.set(key, value);
     }
     m.tx = null;
     r.tx = null;
@@ -620,6 +651,28 @@ describe("stateful property model: the store is a Map that survives reloads", ()
               new SetCmd({ entityType: "contact", id: "1" }, { a: 1 } as EntityRecord),
               new FlushCmd(),
               new SetCmd({ entityType: "contact", id: "2" }, { b: 2 } as EntityRecord),
+              new RebootCmd(),
+            ],
+          ],
+          // DAN-749, found by CI on an unlucky seed (379607583, failed at run
+          // 182 of 200) and pinned here so it can never again depend on the
+          // sampler. gc() is the ONE command with no `txHolds` guard — it takes
+          // no key, so it cannot have one — which makes this the only way an
+          // eviction can land between an optimistic write and its commit:
+          //
+          //   retain → release (refcount 0) → tx.set → gc() evicts it
+          //     → tx.commit → reboot: is the confirmed write still there?
+          //
+          // It must be. The oracle used to say no, because commit read memory
+          // residency and the entity was no longer resident. That is the
+          // evict/delete conflation ADR-004 forbids and ADR-013 settled.
+          [
+            [
+              new RetainCmd({ entityType: "order", id: "1" }),
+              new ReleaseCmd({ entityType: "order", id: "1" }),
+              new TxSetCmd({ entityType: "order", id: "1" }, {} as EntityRecord),
+              new GcCmd(),
+              new TxCommitCmd(),
               new RebootCmd(),
             ],
           ],
