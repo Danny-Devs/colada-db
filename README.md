@@ -43,6 +43,8 @@ Reads never await. `store.get` returns a reactive ref backed by the in-memory pr
 
 ## The agent surface (`packages/mcp`)
 
+> **Not separately published yet.** `colada-db-mcp` lives in this repository and is exercised by its own test suite and observe-run, but it is not on npm — `npm install colada-db-mcp` will not resolve. Everything below describes code you can read and run from the repo today, not a package you can install.
+
 `colada-db-mcp` is a **read-only in-page MCP server** over the store — an agent using the official MCP SDK client can discover the schema, query entities, and read the change history, over a real protocol session (`InMemoryTransport` linked pair; browser pages can't accept stdio/streamable-HTTP, and the durable store is origin-private anyway). External-client bridging is deliberately out of scope for now. (ADR-011, DAN-580)
 
 What it enforces, honestly stated:
