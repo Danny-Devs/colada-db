@@ -4,6 +4,33 @@
 
 > **Status: pre-release.** colada-db is being extracted from [`pinia-colada-plugin-normalizer`](https://github.com/Danny-Devs/pinia-colada-plugin-normalizer) (shipped, on npm since v0.1.0), which becomes its first framework adapter. Not yet published under this name.
 
+## Install
+
+```bash
+npm install colada-db @vue/reactivity
+```
+
+`@vue/reactivity` (>=3.3.0) is a peer dependency — it is the signal engine, and works standalone with no Vue runtime. `@sqlite.org/sqlite-wasm` is an **optional** peer, needed only if you use `sqliteEngine`; the default IndexedDB engine has no extra dependencies.
+
+## Quickstart
+
+```ts
+import { createEntityStore, enablePersistence, idbEngine } from "colada-db";
+
+const store = createEntityStore();
+const handle = enablePersistence(store, { engine: idbEngine() });
+await handle.ready; // hydrated from IndexedDB before your first read
+
+store.set("contact", "1", { id: "1", name: "Ada", email: "ada@example.com" });
+
+const contact = store.get("contact", "1"); // a reactive ref — the read is synchronous
+console.log(contact.value.name); // "Ada"
+
+await handle.flush(); // the write is now durable
+```
+
+Reads never await. `store.get` returns a reactive ref backed by the in-memory projection, while persistence happens write-behind underneath — reload the page and `handle.ready` brings it all back. That the data actually survives process death is not a claim we make on paper: it is asserted against real IndexedDB and real OPFS SQLite in a real browser, in `tests/browser/`.
+
 ## The design
 
 - **Normalized entity graph, synchronous reads.** Every entity lives once. Reads are synchronous reactive refs from an in-memory projection — the UI never awaits the database.
@@ -11,7 +38,7 @@
 - **AI-first by design — the four trust primitives are in this build.** The committed cornerstone (ADR-007), shipped 2026-07-19: origin tags on every write (`WriteOrigin`, stamped by each write channel — unforgeable through the ordinary write API), a **pre-apply** policy veto gate (`useGate`: a veto means the write never touched the store; commit-time `willCommit` is last-chance and rolls back), a capped queryable history store (`enableHistory`: field-level old→new rows with write ids and origins, purge-on-remove erasure — settled state; settle transactions before logout flows, see the module docs — count + byte bounds), and a machine-legible schema export (`exportSchema`: the registry as plain JSON — the future MCP resource). Each justified by non-AI needs (undo, sync, devtools), each the substrate for agent attribution, policy enforcement, and the agent surface below. Origin = attribution within one trust domain, not authentication.
 - **Query-driven hydration — memory is a projection, not the whole DB.** Scope manifests (`setManifest`) persist which entities each query/screen needs; `hydration: "manifest"` boots by loading exactly that set via `loadMany` (never a full scan), retained per scope so GC can't evict what a live scope uses. `removeManifest` releases + sweeps; `hydrateScope`/`preload` page durable-but-cold rows back in. Two documented boundaries: **type enumeration reflects the memory projection, not the DB** (cold rows are invisible to any API that walks the store until a scope pulls them in), and **`===` stability ends at evict** — re-hydration materializes new object identity; within-session stability is unaffected because retained entities are never evicted. Without `preload`, first paint on a cold entity shows pending (the synchronous `store.has` check can't see disk). See `docs/design/query-driven-hydration.md`. (DAN-578)
 - **Live filtered views, two-tier.** `createMatcherView` keeps a reference-stable membership view (ids array, `===`-stable while membership is unchanged) over the serializable matcher AST (ADR-009): validated filters update **purely from change events** — zero query re-runs; closures fall back to coalesced re-scans, always correct. Members are retained while displayed (GC can never evict a live result), and a dev-mode `verifyIntegrity` guard re-scans and self-heals so the fast tier can never silently diverge from re-run truth. Honest boundary: the view's universe is the **memory projection** — durable-but-cold rows are invisible until hydrated (worker-seeded universes are the Stage-2d worker tier's job). See `docs/design/live-matcher-views.md`. (ADR-010, DAN-606)
-- **Server-authoritative sync, bring your own backend.** A three-method `SyncAdapter` contract (pull/push/subscribe), battle-tested against seven production sync systems before implementation. No CRDTs where none are needed. (ADR-005, ADR-006)
+- **Server-authoritative sync — specified, not yet shipped.** The three-method `SyncAdapter` contract (pull/push/subscribe) is designed and frozen on paper, battle-tested on paper against seven production sync systems, and deliberately CRDT-free. **No adapter ships in this release and nothing sync-related is exported yet** — ADR-006 is still `Proposed`, with implementation scheduled for Stage 3. It is listed here because the durability layer was built to accept it, not because you can call it today. (ADR-005, ADR-006)
 - **One reactive graph.** Built on `@vue/reactivity` (standalone — no Vue runtime dependency). Framework adapters share the engine's reactivity instead of shimming a second signal system into it.
 
 ## The agent surface (`packages/mcp`)
@@ -38,8 +65,11 @@ pnpm install
 pnpm -r test        # vitest, all workspace packages (core + packages/mcp)
 pnpm -r typecheck
 pnpm -r build       # tsdown
+pnpm test:browser   # real Chromium: real IndexedDB + real OPFS SQLite, write → reload → read
 cd packages/mcp && pnpm observe   # drive the BUILT agent surface end-to-end
 ```
+
+`pnpm test` is the fast inner loop and runs against in-process stand-ins. `pnpm test:browser` is the lane where the storage is real and the process actually dies — it is deliberately separate so the inner loop stays fast, and it needs a one-time `pnpm exec playwright install chromium`.
 
 ## License
 
