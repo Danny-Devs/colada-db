@@ -770,3 +770,70 @@ teardown/pause flag guards a code path, ask whether that path is starting
 NEW work or finishing ALREADY-ACCEPTED work — exempt the latter (thread an
 explicit `final`/`draining` token through it), and never solve it by
 deferring the flag, which un-guards everything else the flag protects.
+
+## [2026-08-02] — a deferral is not additive when the contract is public
+
+**Mistake:** ADR-006 rev d was first drafted resolving 18 of 20 open points and
+leaving two — named-mutator rebase and priority-tiered hydration — open, on the
+stated grounds that they were "additive later, not one-way doors." Danny
+rejected that in review and was right.
+
+**Why it happened:** the claim is true of the FIELDS and false of the CONTRACT.
+Adding a second way to express a write to a protocol that other people's servers
+already speak forces every adapter thereafter to handle both. The deferral does
+not avoid that cost; it buys the cost later at a worse price, which is precisely
+the calcification ADR-006 was frozen early to prevent. The reasoning was
+effort-shaped uncertainty dressed as prudence — and this workspace's standing
+rule is to filter by value, correctness and wisdom, never by effort.
+
+The general form is worth keeping, because it is why the old instinct felt
+right: leaving a spec unfinished used to be rational because BUILDING TEACHES
+YOU THINGS, so learning beat guessing. When implementation is cheap and the
+thinking is the expensive part, that trade inverts. A hole in a spec stops being
+humility and becomes a decision handed to whoever implements it, who fills it by
+accident and makes it permanent.
+
+**Fix:** both resolved (D19, D20) and ADR-006's Open Questions section is now
+empty by decision. Every rev-d resolution carries a **falsification test** —
+what would prove it wrong — instead of a hedge, which is what survives from the
+old instinct once the blank is removed. Encoded here, in the ADR's own D19/D20
+prose, and in the now-empty Open Questions section of
+`docs/specs/sync-adapter.allium`, which is the file where the temptation recurs.
+
+**For future agents:** before leaving a question open in a frozen contract, ask
+whether the eventual answer ADDS a field or adds a SECOND WAY TO DO THE SAME
+THING. The first is genuinely additive; the second is a permanent wart every
+future implementer pays for. If you cannot decide it, write the decision anyway
+with the test that would falsify it.
+
+## [2026-08-02] — a guard inside `it` passes; a guard outside it skips
+
+**Mistake:** the first cut of the SyncAdapter conformance kit
+(`src/sync-conformance.ts`) guarded its `limit` and batching assertions with an
+early `return` INSIDE the `it` body when the optional `seedRemote` hook was
+absent. A red-proof run — deliberately pointing the kit at a broken adapter —
+showed `honours limit as a ceiling` reporting PASS against an adapter that
+over-serves `limit`, because it had returned before asserting anything.
+
+**Why it happened:** an early `return` in a Vitest test body is indistinguishable
+from a successful test. The reporter prints a green tick either way, so a kit
+whose hooks are unsupplied reports full conformance against an adapter it never
+examined — the worst possible failure for an artifact whose entire purpose is
+telling third parties whether their backend is correct.
+
+This is the false-green family again, one level up from the five instances in
+`knowledge/verification-integrity-2026-07-23.md`: a check that reports success on
+a question it never evaluated.
+
+**Fix:** the guard moved to DESCRIBE level as an explicit `it.skip` with the
+reason in its name, so an unexercised property is visible in the reporter rather
+than counted as a pass. The kit is also shipped with `src/sync-conformance.spec.ts`,
+which runs every property against a deliberately broken mutant — that red-proof
+is what caught this, and it is the only reason it was caught before the kit
+reached an adapter author.
+
+**For future agents:** in any test framework where a bare `return` ends a test
+successfully, never guard an assertion with one. Hoist the condition to the
+suite level and skip explicitly. And never ship a conformance kit that has not
+been watched to fail — a kit asserting nothing passes every implementation and
+reads as rigour.
