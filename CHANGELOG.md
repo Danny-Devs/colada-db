@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Security
+
+- **GHSA-frvp-7c67-39w9 cleared from the dependency tree** (moderate, CVSS 5.9 —
+  path traversal in `@hono/node-server`'s `serve-static` on Windows via an
+  encoded backslash). It reached the workspace transitively through
+  `packages/mcp` → `@modelcontextprotocol/sdk` → `@hono/node-server@1.19.14`.
+  **Published consumers were never exposed:** `colada-db` ships zero runtime
+  dependencies (only the `@vue/reactivity` peer and the optional sqlite-wasm
+  peer), `packages/mcp` is not on npm, and that package uses `InMemoryTransport`
+  exclusively — it never constructs an HTTP server, so the vulnerable
+  static-file path is unreachable in how the SDK is used here. Fixed rather than
+  dismissed: SDK bumped to `^1.30.0`, which widened its own range to
+  `^1.19.9 || ^2.0.5`, plus a pnpm override selecting the patched line — pnpm
+  had otherwise kept the locked 1.19.14, which still satisfied the widened
+  range. The override stays inside the range the SDK itself declares, so nothing
+  unsupported is being forced. `pnpm audit`: no known vulnerabilities. Verified
+  the bump did not disturb the agent surface — 29 tests plus the 8-check
+  observe-run against the built server.
+
 ### Changed
 
 - **Branch protection is live on `main`; ADR-021 no longer describes a gate it
