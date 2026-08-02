@@ -13,6 +13,89 @@ Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
 
+## [2026-08-02] — GitHub silently dropped a workflow trigger, and under required checks that is an unmergeable PR with no error anywhere
+
+**Mistake:** the first PR opened after `main` became protected sat at
+`mergeable_state: blocked` forever. Six checks are required; **zero** of them
+had run. Not failed — *never started*.
+
+```
+$ gh api "repos/.../actions/runs?branch=docs/agents-post-publish-state"
+total: 0
+```
+
+**Why it happened:** nothing was misconfigured. Actions were enabled, the
+workflow was `active`, githubstatus.com reported Actions operational, the
+triggers were `push: branches: ["**"]` (which does match branch names
+containing `/`) plus an unfiltered `pull_request:`, there are no `paths-ignore`
+filters, and the remote branch head matched the PR head exactly. GitHub simply
+did not create the run for that push.
+
+The reason this is worth an entry rather than a shrug is what full enforcement
+does to it. A dropped trigger used to be invisible and harmless — CI was
+advisory. With `enforce_admins: true` and six required contexts, a check that
+is *never reported* is indistinguishable from one still running: the PR shows
+"Expected — Waiting for status to be reported", forever. There is no error, no
+red X, and no log to open, because there is no run. The natural conclusion is
+"the required-checks setup is broken," and the natural next move is to start
+dismantling branch protection.
+
+**Fix:** push again. An empty commit is enough and is the least destructive
+option:
+
+```bash
+git commit --allow-empty -m "chore: retrigger CI"
+git push origin <branch>
+```
+
+Both the `push` and `pull_request` runs appeared within ~15 seconds of the
+retry, against an unchanged tree. Nothing else was touched.
+
+**For future agents:** before concluding that branch protection or the workflow
+is misconfigured, check whether the run **exists at all** —
+`gh api "repos/OWNER/REPO/actions/runs?branch=BRANCH" --jq .total_count`. Zero
+runs and a failed run are completely different diagnoses that present the same
+way in the PR UI. Zero means retrigger; do not go edit the required-contexts
+list, and do not disable protection to "unblock" it.
+
+## [2026-08-02] — a scripted prepend is not an append, and no lint covers CHANGELOG.md
+
+**Mistake:** the `## [Unreleased]` section accumulated **four** separate
+`### Changed` headings, two `### Fixed` variants, and an intro paragraph shoved
+down into the middle of the bullet list. CodeRabbit caught one duplicate on a
+PR; the real count was worse.
+
+**Why it happened:** each session's entry was added with
+
+```bash
+perl -0pi -e 's/(## \[Unreleased\]\n)/$1\n### Changed\n\n- ...\n/' CHANGELOG.md
+```
+
+which re-opens the section at the top every time instead of adding to the
+existing group of the right type. It looked correct after each individual run —
+the new bullet was there, in a heading with the right name — and the damage was
+only visible by reading the whole section at once, which nobody did because
+each edit was verified in isolation.
+
+Note the family this belongs to. `CHANGELOG.md` has no lint, no schema and no
+gate; it is the one file in this repo where "it looked right" is the *only*
+check that ever runs. Every other recurring failure logged here is a mechanism
+that reported success without evaluating the question — this is the same shape
+with no mechanism at all.
+
+**Fix:** consolidated to one heading per type in Keep a Changelog order, with
+the bullet count asserted before and after (15 → 15) and `git diff` checked for
+removed prose. `.coderabbit.yaml` now carries a `path_instructions` entry for
+`CHANGELOG.md` stating the one-heading-per-type rule, so the automated reviewer
+enforces it on every PR — the strongest encoding available for a file no linter
+covers.
+
+**For future agents:** when adding a CHANGELOG entry, **read the whole
+`[Unreleased]` section first and add the bullet to the existing heading of the
+right type.** Do not script a prepend against the section header. If you do
+script it, re-read the section afterwards — the verification has to cover the
+result, not just the insertion.
+
 ## [2026-08-02] — the same trap, mirrored: a gate that reported FAILURE on a question it never evaluated
 
 **Mistake:** `npm publish --dry-run` — the rehearsal you run *because* the real
