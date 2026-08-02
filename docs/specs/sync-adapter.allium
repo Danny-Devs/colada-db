@@ -2,11 +2,18 @@
 --
 -- colada-db — the SyncAdapter contract (Stage 3 / Phase 5)
 --
--- Source of truth: docs/adr/006-sync-adapter-interface.md, frozen at rev c
--- (2026-07-24). This file is a TRANSCRIPTION of that contract into checkable
+-- Source of truth: docs/adr/006-sync-adapter-interface.md, frozen at rev d
+-- (2026-08-02). This file is a TRANSCRIPTION of that contract into checkable
 -- form, not an improvement on it. Where ADR-006 is deliberately silent, the
 -- silence is recorded in the Open Questions section at the bottom rather than
 -- resolved by invention.
+--
+-- Rev d history: writing THIS FILE against rev c is what exposed 20 unresolved
+-- points, four of them outright contradictions between ADR sections (DAN-736).
+-- A specification forces every clause to be representable, and four were not.
+-- Rev d resolved 18; the two that remain below are open by decision, not by
+-- oversight. Every "the spec takes this path" hedge that used to appear in a
+-- guidance block is gone — the ADR now says which path, so this file states it.
 --
 -- Companion decisions: ADR-003 (memory projection, not store swap), ADR-004
 -- (evict is not delete), ADR-005 (version metadata slot + server-authoritative
@@ -47,7 +54,9 @@ external entity EntityData {}
 external entity EntityTypeRegistration {
     name: String
     -- ADR-006 §5: device-local types (pagination containers, UI state) are
-    -- excluded from replication. See open question on the flag's spelling.
+    -- excluded from replication. Spelled `local: true` on defineEntity — the
+    -- shipped EntityDefinition name, adopted by rev d D7 over the ADR's former
+    -- `sync: false`, because the code is published and the ADR was not.
     device_local: Boolean
 }
 
@@ -135,8 +144,13 @@ value ConfirmationMark {
 -- that cannot decrypt your data can never evaluate (C1).
 value PullSelection {
     cursor: Cursor?            -- null = initial sync
-    limit: Integer?
+    limit: Integer?            -- a HINT (D8): adapter may return fewer, never more
     schema_version: String?
+    -- rev d D5. Which partition to pull. An OPAQUE NAME: the adapter owns the
+    -- namespace, core never parses it, and absent means the single default
+    -- partition. This is the most a partition can be without foreclosing E2EE
+    -- (C1) — a name is not a predicate.
+    subscription: String?
 }
 
 -- The handle returned by the optional live channel.
@@ -189,12 +203,58 @@ contract SyncTransport {
         -- a relay that cannot decrypt the data can never evaluate one, and no
         -- future adapter recovers the property once core depends on it.
 
+    @invariant SubscriptionIsAnOpaqueNameOwnedByTheAdapter
+        -- rev d D5, resolving what a subscription IS. A subscription is a
+        -- partition of the pull stream identified by an OPAQUE STRING. The
+        -- coordinator holds that name and a cursor and nothing else; it never
+        -- knows what predicate produced the partition. The adapter owns the
+        -- namespace and declares the set; core never parses, validates or
+        -- derives meaning from the string — the same discipline C3 imposes on
+        -- client_id. An absent name means the single default partition, which
+        -- is why this is additive rather than a break. The name is echoed on
+        -- the outcome so a batch can be routed back to its cursor.
+        --
+        -- This shape is DICTATED by C1, not chosen for convenience: an opaque
+        -- name is the most a partition can be without letting a server-side
+        -- shape model reach the coordinator, and that door does not reopen.
+
+    @invariant AtMostOnePushInFlightPerClient
+        -- rev d D17. Ordered delivery plus "server rejects gaps" makes
+        -- concurrent pushes unsound — two in flight IS a gap the moment either
+        -- is retried. Push and pull MAY overlap: they are different directions,
+        -- and confirming on the pull channel (§1b) is precisely what makes the
+        -- overlap safe.
+
+    @invariant TombstonesOutliveTheOldestHonouredCursor
+        -- rev d D15. A backend MUST retain tombstones at least as long as the
+        -- oldest cursor it will still honour, and compaction that drops them
+        -- MUST invalidate the affected cursors — which the client observes as a
+        -- reset directive. This turns "how long must a tombstone live?", which
+        -- has no general answer, into a relation between two things the backend
+        -- already knows.
+
     @invariant LiveChannelIsOptionalPokeFirstAndLossy
         -- subscribe is optional. When present it is a bare hint that triggers
         -- pull(); inline data is an optimization, not a delivery guarantee. The
         -- stream is licensed to drop events — a reset directive on the pull
         -- channel is the recovery path. The returned LiveChannel is disposable
         -- and closing it must stop delivery.
+
+    @invariant SchemaVersionMismatchNeverDropsWrites
+        -- rev d D12. On PULL, a backend that cannot serve the client's schema
+        -- version returns a reset directive. On PUSH, it throws a typed
+        -- SchemaVersionError; the coordinator SUSPENDS the outbox and surfaces
+        -- the state. It does not drain it and it does not discard it. A schema
+        -- bump may need an application-level migration, and the outbox is the
+        -- one thing that has to survive one.
+
+    @invariant InlineResetIsAPokeNeverAnInstruction
+        -- rev d D16. Inline changes on the live channel may be applied only if
+        -- they carry a cursor that advances that subscription's cursor
+        -- monotonically. An inline `reset` schedules a pull and nothing else —
+        -- it never discards state on its own authority. Forced by the channel's
+        -- own definition above: subscribe is LICENSED TO BE LOSSY, and a lossy
+        -- channel must never be able to destroy state.
 
     @invariant TombstonesNotOmissions
         -- A deletion arrives as an explicit `remove` change. Hard deletes with
@@ -220,10 +280,22 @@ contract VersionOrdering {
         -- such site would otherwise have to change the day an adapter needs a
         -- partial order.
 
-    @invariant DefaultIsNumericThenLexicographic
+    @invariant DefaultIsNumericThenLexicographicAndNeverConcurrent
         -- An adapter that supplies no comparator gets the default: numeric when
         -- both tokens parse as numbers, lexicographic otherwise. Overriding it
-        -- is the adapter's choice, not core's.
+        -- is the adapter's choice, not core's. The default NEVER returns
+        -- `concurrent` — which is why rev d D3's fourth value costs a
+        -- server-authoritative deployment nothing at all.
+
+    @invariant ConcurrentIsRepresentableAndAppliesRemote
+        -- rev d D3. A comparator MAY return `concurrent`; the coordinator's
+        -- policy is to apply the remote change, because under §6's
+        -- server-authoritative posture the pull channel's arrival order is the
+        -- tiebreak. An adapter that wants merge semantics resolves them INSIDE
+        -- itself before emitting the change — the posture lives in the adapter,
+        -- not the store (C3 §C3). The value exists so a future E2EE or CRDT-ish
+        -- adapter has somewhere to put causality that today's code already
+        -- routes through, rather than a comparison site that must change.
 
     @invariant CoreNeverInterpretsTheToken
         -- A vector clock, a Lamport-plus-actor pair or a signed blob may be
@@ -245,6 +317,22 @@ contract ClientIdentity {
         -- The value is stable for the lifetime of a client and shared across a
         -- tab group, so that (client_id, seq) keys the outbox durably across
         -- reloads and crashes.
+
+    @invariant AuthenticationMaterialIsMintedAtCommitTime
+        -- rev d D4, and the whole reason §1c survives C3. Any authentication
+        -- material an entry carries — a signature, a MAC, a capability — is
+        -- attached when the entry is COMMITTED to the outbox and persisted with
+        -- it. It is never computed at push time. Mint it at push time and
+        -- sibling-outbox recovery silently stops working the day client_id
+        -- becomes a public key, because the adopting client cannot sign as the
+        -- owner of a key it does not hold. Adoption is RELAY: the adopter
+        -- forwards the entry exactly as committed, and the server verifies the
+        -- entry rather than the sender.
+
+    @invariant AdoptionIsSameDeviceOnly
+        -- rev d D4. Siblings are tabs and workers sharing one StorageEngine on
+        -- one device. Cross-device adoption was never in scope and would need
+        -- exactly the re-authorship the invariant above rules out.
 }
 
 ------------------------------------------------------------
@@ -255,11 +343,18 @@ enum ChangeOp { set | remove }
 
 enum VerdictStatus { ack | reject | transform }
 
-enum VersionOrder { older | same | newer }
+-- rev d D3. Four-valued: three cannot say "concurrent", and C2 requires this
+-- seam to be able to express a PARTIAL order. The default comparator never
+-- emits `concurrent`, so the fourth value costs a server-authoritative
+-- deployment nothing and keeps the HLC door open — which is what the
+-- pre-publish widening of the version slot to string-or-number was for.
+enum VersionOrder { older | same | newer | concurrent }
 
 -- ADR-007 §1 write-channel vocabulary, restricted to the two origins this
--- boundary cares about. Echo suppression is by provenance (ADR-014).
-enum WriteOrigin { local_mutation | remote }
+-- boundary cares about. Echo suppression is by provenance (ADR-014). rev d D6
+-- adopted the shipped WriteOrigin spelling `sync-pull` over the ADR's former
+-- `remote`, because the code is published and the ADR was not.
+enum WriteOrigin { local_mutation | sync_pull }
 
 enum ExclusionReason { device_local | cache_eviction | local_reset }
 
@@ -381,14 +476,26 @@ variant ResetDirective : PullOutcome {
 -- Config
 ------------------------------------------------------------
 
--- Every value below is a DEFAULT CHOSEN HERE, not a value ADR-006 specifies.
--- Each has a matching open question at the bottom of this file.
+-- Every value below is now SPECIFIED BY ADR-006 rev d (D8, D9, D10), not chosen
+-- here. The open questions that used to shadow them are resolved and deleted.
+--
+-- Note what is ABSENT and why: there is no push_retry_attempt_ceiling and no
+-- dead-letter queue (D9). A ceiling silently drops a user's write, and staying
+-- visibly stuck is strictly better than that — correct for a job queue, wrong
+-- for a local-first database where the outbox is durable and offline is
+-- indefinite by design. Observability replaces truncation: a write is dropped
+-- by a user or by a `reject`, never by a timer.
+--
+-- checksum_verification_enabled is also absent, deliberately (D11). Verification
+-- is PRESENCE-driven: verify iff the adapter supplied a checksum. An adapter
+-- that sends one is asserting it means something, and a flag letting the client
+-- ignore it would make the field decorative.
 config {
-    pull_batch_limit: Integer = 500
+    pull_batch_limit: Integer = 500          -- D8: a HINT to the adapter
     push_retry_initial_backoff: Duration = 1.seconds
     push_retry_max_backoff: Duration = 60.seconds
-    reset_resync_jitter: Duration = 30.seconds
-    checksum_verification_enabled: Boolean = false
+    reset_resync_jitter: Duration = 30.seconds   -- D10: uniform [0, 30s), drawn
+                                                 -- INDEPENDENTLY per subscription
 }
 
 ------------------------------------------------------------
@@ -522,8 +629,16 @@ rule TransformRebasesTheWrite {
         -- optimistic one, and an id remap (temp-ID to server-ID) is applied
         -- ATOMICALLY: rekey the entity, rewrite outbox references, emit one
         -- move event. Partial application here is observable as a duplicate.
-        -- Whether transform also waits for pull confirmation is an open
-        -- question below; this rule takes the §1b path.
+        --
+        -- rev d D2 settles what rev c left contradictory. `transform` has TWO
+        -- effects and they were never one operation. The id remap is IMMEDIATE
+        -- — queued outbox entries still reference the temp id and would keep
+        -- pushing it otherwise. The overlay drop WAITS on the pull channel,
+        -- exactly like ack, because dropping on the push channel is the precise
+        -- double-apply race §1b was written to kill. Hence status here is
+        -- awaiting_confirmation, not confirmed. Only `reject` acts entirely on
+        -- the push channel, which is safe because a reverted write has nothing
+        -- left to double-apply.
 }
 
 rule TransientFailureRetriesWithBackoff {
@@ -556,8 +671,15 @@ rule RecoverStrandedOutboxOnBoot {
         -- ADR-006 §1c. Outbox entries are keyed (client_id, seq), so a booting
         -- client may find and re-push a crashed or frozen sibling tab's
         -- stranded entries without losing writes. It is safe because the server
-        -- dedups by per-client seq. See the open question about what adopting a
-        -- sibling's client_id means once client_id is a public key.
+        -- dedups by per-client seq.
+        --
+        -- rev d D4 reconciles this with C3, which rev c left unreconciled.
+        -- Adoption is RELAY, NOT AUTHORSHIP: the adopting client forwards the
+        -- entry exactly as it was committed and the server verifies the entry
+        -- rather than the sender, so an adopter never needs to authenticate as
+        -- the owner of a client_id it does not hold. What makes that true is a
+        -- commit-time obligation — see contract ClientIdentity
+        -- (AuthenticationMaterialIsMintedAtCommitTime, AdoptionIsSameDeviceOnly).
 }
 
 -- ── Confirmation: the overlay is dropped on the PULL channel, never on ack ──
@@ -573,22 +695,20 @@ rule ConfirmOnPulledMutationMark {
         OptimisticOverlayDropped(entry: entry)
 }
 
-rule ConfirmOnPulledCheckpoint {
-    when: PullCheckpointReached(subscription, entry, checkpoint_version)
-    requires: entry.status = awaiting_confirmation
-    requires: entry.server_version != null
-    requires: compare_version(checkpoint_version, entry.server_version) != older
-    ensures:
-        entry.status = confirmed
-        entry.confirmed_by_pull = true
-        OptimisticOverlayDropped(entry: entry)
-
-    @guidance
-        -- The second of §1b's two confirmation paths: a pulled checkpoint at or
-        -- past the ack's server watermark confirms the write even when the
-        -- snapshot carried no per-mutation marks. Note the version comparison
-        -- goes through the adapter's comparator, not through `>=`.
-}
+-- rev d D1: rule ConfirmOnPulledCheckpoint IS DELETED, and its trigger
+-- PullCheckpointReached with it. §1b used to offer a second confirmation path —
+-- "a pulled checkpoint >= the ack's serverVersion" — which `allium analyse`
+-- flagged as a dead trigger because PullResult carries no checkpoint field for
+-- it to travel in.
+--
+-- It was deleted rather than built, and the reason is NOT that it was
+-- unimplemented. A checkpoint comparison asks "is checkpoint >= serverVersion",
+-- which presumes versions are TOTALLY ordered — and C2 exists precisely to keep
+-- them partially ordered so a vector clock or HLC stays representable. Keeping
+-- both paths meant keeping one that only works when the other constraint is
+-- switched off. ConfirmOnPulledMutationMark above is now the sole confirmation
+-- channel, and it costs a backend nothing extra: per-client seq tracking is
+-- already mandatory (LocalChange.seq, contract OrderedDeliveryPerClient).
 
 -- ── Pull path: cursor-based, batched, resumable, staged until complete ─────
 
@@ -686,19 +806,32 @@ rule ResetOnAdapterDirective {
         -- entity partition is discarded and resynced. The OUTBOX is not: it
         -- lives in a separate durable store precisely so a state reset can
         -- never destroy unpushed writes.
+        --
+        -- rev d D13 settles what rev c left silent: a SERVER-DIRECTED reset does
+        -- not invalidate in-flight mutation_ids or seqs either. The client
+        -- resumes pushing the same seq range. Reset is a statement about the
+        -- PULL stream; seq is a fact about the WRITE stream, tracked per client
+        -- on the server. The two are independent, which is the same reason the
+        -- outbox lives in its own store to begin with.
 }
 
 rule ResetOnChecksumMismatch {
     when: PullBatchApplied(subscription, outcome)
     requires: subscription.status = applying
     requires: outcome.kind = ChangeBatch
-    requires: config.checksum_verification_enabled
     requires: outcome.checksum != null
     requires: not checksum_matches(outcome.checksum, subscription)
     ensures:
         subscription.status = resetting
         subscription.reset_at = now
         PartitionDiscarded(subscription: subscription)
+
+    @guidance
+        -- rev d D11. Verification is PRESENCE-driven, not flag-driven: there is
+        -- no longer a config switch, because an adapter that sends a checksum is
+        -- asserting it means something and a flag letting the client ignore it
+        -- would make the field decorative. The reset is scoped to THIS
+        -- subscription and no other.
 }
 
 rule CompleteApplyAndConfirm {
@@ -706,8 +839,7 @@ rule CompleteApplyAndConfirm {
     requires: subscription.status = applying
     requires: outcome.kind = ChangeBatch
     requires:
-        not config.checksum_verification_enabled
-        or outcome.checksum = null
+        outcome.checksum = null
         or checksum_matches(outcome.checksum, subscription)
     ensures:
         subscription.status = idle
@@ -750,21 +882,48 @@ rule ApplyNewerRemoteChange {
     requires:
         not exists current
         or current.version = null
-        or compare_version(change.version, current.version) = newer
+        or compare_version(change.version, current.version) in {newer, concurrent}
     ensures: RemoteChangeApplied(
         subscription: subscription,
         change: change,
-        origin: remote
+        origin: sync_pull
     )
 
     @guidance
-        -- ADR-006 §2 and §3 together. The change is applied under a `remote`
-        -- provenance stamp (ADR-014), which is what keeps it from re-entering
-        -- the outbox as though the user had typed it — echo suppression by
-        -- construction rather than by a phase flag. And it is applied only if
-        -- the comparator says it is newer, upgrading ADR-005's fresh-wins from
-        -- existence-based to version-based. A `remove` change is a SEMANTIC
+        -- ADR-006 §2 and §3 together. The change is applied under the
+        -- `sync-pull` provenance stamp (ADR-014), which is what keeps it from
+        -- re-entering the outbox as though the user had typed it — echo
+        -- suppression by construction rather than by a phase flag. And it is
+        -- applied only if the comparator says so, upgrading ADR-005's fresh-wins
+        -- from existence-based to version-based. A `remove` change is a SEMANTIC
         -- delete (store.remove, durable row deleted), never an evict.
+        --
+        -- rev d D3 adds the `concurrent` arm. A remote change the comparator
+        -- cannot order against the local one is APPLIED: under §6's
+        -- server-authoritative posture the pull channel's arrival order is the
+        -- tiebreak. An adapter wanting merge semantics resolves them inside
+        -- itself before emitting the change.
+}
+
+rule IgnoreDeviceLocalTypeOnPullChannel {
+    when: RemoteChangeReceived(subscription, change)
+    let registration = EntityTypeRegistration{name: change.entity_type}
+    requires: exists registration
+    requires: registration.device_local
+    ensures: RemoteChangeSkipped(subscription: subscription, change: change)
+
+    @guidance
+        -- rev d D18, and the half that is NOT symmetric with the other. An
+        -- UNREGISTERED type arriving on pull is applied: the store keys rows by
+        -- Typename:id and needs no definition to hold one (EntityDefinition is
+        -- consumed by normalize.ts alone, never by store.ts), so what is lost is
+        -- nested-ref normalization, not the data.
+        --
+        -- A DEVICE-LOCAL type is different in kind. `local: true` is the
+        -- CLIENT'S declaration that this type never leaves the device, so
+        -- receiving one back means the server holds data it should never have
+        -- had. Dropping it is correct, and saying so out loud is how anyone
+        -- finds out — this skip is expected to be observable, not silent.
 }
 
 rule SkipStaleRemoteChange {
@@ -772,8 +931,15 @@ rule SkipStaleRemoteChange {
     let current = StoredEntity{entity_type_name: change.entity_type, id: change.id}
     requires: exists current
     requires: current.version != null
-    requires: compare_version(change.version, current.version) != newer
+    requires: compare_version(change.version, current.version) in {older, same}
     ensures: RemoteChangeSkipped(subscription: subscription, change: change)
+
+    @guidance
+        -- rev d D3. This used to read `!= newer`, which silently swept
+        -- `concurrent` into the skip arm the moment the fourth value existed —
+        -- exactly the kind of site C2 warns about. The two rules now enumerate
+        -- the enum between them, so adding a fifth value would fail to compile
+        -- rather than fail silently.
 }
 
 ------------------------------------------------------------
@@ -817,6 +983,18 @@ invariant StagedBatchesAreNotApplied {
 invariant StoppedSubscriptionsAreQuiescent {
     for subscription in SyncSubscriptions:
         subscription.status = stopped implies subscription.reset_at = null
+}
+
+-- rev d D14. An id remap rewrites dependent queued entries' ids AND CLEARS
+-- their base_version: that version referred to a version of an entity that no
+-- longer exists under that key, so carrying it forward asserts something false.
+-- For a dependent already PUSHED under the old id, the server owns the remap and
+-- applies it to entries it has already accepted — the client's rewrite is local
+-- bookkeeping and never a second request.
+invariant RemappedEntriesCarryNoStaleBaseVersion {
+    for entry in OutboxEntries:
+        entry.status in {pending, in_flight} and entry.change.id != entry.entity_id
+            implies entry.change.base_version = null
 }
 
 ------------------------------------------------------------
@@ -923,45 +1101,24 @@ surface LocalWriteBoundary {
 -- Open Questions
 ------------------------------------------------------------
 
--- Each entry below is a place ADR-006 rev c is silent or reads two ways. None
--- is resolved here. Section references are to ADR-006 unless stated.
+-- ADR-006 rev d (2026-08-02) RESOLVED 18 of the 20 questions this section used
+-- to carry. They are deleted rather than annotated: a resolved question left in
+-- place reads as still-open to the next reader, and the ADR is now the asserter.
+-- The resolutions are D1-D18 in the "Rev d" section of
+-- docs/adr/006-sync-adapter-interface.md, and each one names the rule, contract
+-- invariant or config value in THIS file that carries it.
+--
+-- Writing this section against rev c is what made those 18 visible. Re-reading
+-- the ADR would not have: prose tolerates a clause with no referent, and a
+-- specification does not. Four of them were outright contradictions between ADR
+-- sections, and `allium analyse` independently flagged one as a dead trigger.
+--
+-- The two below remain open BY DECISION, not by oversight. Both are additive
+-- later and neither is a one-way door — they would add fields, not change the
+-- meaning of existing ones. Resolving them now would mean designing against no
+-- implementation and no user, which is how a contract acquires a feature nobody
+-- asked for and every adapter author has to implement.
 
-open question "Transform and the overlay: does a `transform` verdict complete the write immediately (§1: 'applies the server's corrected entity and any id remap then completes') or does it await pull confirmation like `ack` (§1b: the overlay is dropped only when a pulled snapshot confirms it)? The two sections read differently and this spec takes the §1b path."
+open question "Named-mutator rebase: ADR-006 Consequences lists `{name, args}` on LocalChange (Zero-style shared mutators) as an open item. LocalChange as frozen carries data, not an intent. Additive when a real rebase requirement appears; rev d declined to invent one."
 
-open question "Comparator result shape (rev c C2): C2 requires the version seam to be able to express a PARTIAL order for CRDT causality, but a three-valued older/same/newer result cannot signal 'concurrent'. ADR-006 does not give compare_versions a signature or say how concurrency is represented."
-
-open question "The checkpoint channel does not exist in the frozen types. §1b gives two confirmation paths — confirmedMutations marks, OR 'a pulled checkpoint >= the ack's serverVersion' — but PullResult carries no checkpoint or watermark field. The second path has no wire representation, so as frozen only the first is implementable."
-
-open question "What a subscription IS. §PullResult speaks of per-subscription checksums and per-subscription reset with jitter, but the frozen three-method interface has no subscription parameter — pull(cursor, opts) is global. The partition unit, how many exist, how one is created and how a cursor maps to one are undefined."
-
-open question "pull() limit: `opts.limit?: number` is declared with no default, no ceiling and no statement of what an adapter should do when it is omitted or exceeds what the backend will serve."
-
-open question "Transient-failure retry policy: §PushResult says the coordinator 'retries with backoff' but specifies no schedule, no attempt ceiling, and no poison-message or dead-letter behaviour for an entry that fails transiently forever."
-
-open question "Reset jitter: §PullResult requires per-subscription reset 'with jitter, never a global storm' but gives no window, distribution or bound."
-
-open question "Checksum defaults: ADR-006 names 'per-subscription checksum defaults' as an unresolved implementation-time question in its own Consequences section. Whether verification is on by default, and what a mismatch costs, is unstated."
-
-open question "Named-mutator rebase: ADR-006 Consequences lists `{name, args}` on LocalChange (Zero-style shared mutators) as an open item. LocalChange as frozen carries data, not an intent."
-
-open question "Priority-tiered hydration: named as open in ADR-006 Consequences. PullResult has no priority field and the coordinator has no notion of tiers."
-
-open question "schemaVersion behaviour: rev b added schemaVersion to both pull() and push() opts, but ADR-006 never says what the client does when the backend reports or requires a different schema version — reset, refuse to push, or fail the call."
-
-open question "Reset and in-flight mutations: §1 guarantees the outbox survives a local state reset, but does not say whether a server-directed `reset` invalidates in-flight mutation_ids and seqs, or whether the client resumes pushing the same seq range afterwards."
-
-open question "Id remap fan-out: `transform` may remap a temp id to a server id and 'rewrite outbox refs'. ADR-006 does not say whether base_version on dependent queued entries is also rewritten, nor what happens when a dependent entry was already pushed under the old id."
-
-open question "Tombstone retention: `remove` is a tombstone and hard deletes are unsyncable, but ADR-006 gives no retention obligation — how long a backend must keep tombstones, and whether compaction that drops them must force a reset."
-
-open question "Inline data on the live channel: subscribe() may emit a full PullResult including `reset`. ADR-006 does not say whether inline changes may be applied without the cursor bookkeeping of pull(), nor whether an inline reset is trusted without a pull round-trip."
-
-open question "Sibling-outbox adoption vs opaque identity (§1c against rev c C3): a booting client may push another client's stranded outbox entries, which are stamped with that client's client_id. If client_id becomes a public key, the adopting client cannot authenticate as its owner. ADR-006 does not reconcile the recovery mechanism with the identity constraint."
-
-open question "Push concurrency: 'ordered outbox delivery' plus 'server ignores seq <= lastSeen, rejects gaps' implies serialization, but ADR-006 does not state whether more than one push may be in flight per client, nor whether push and pull may overlap."
-
-open question "Origin stamp spelling: §2 names a `remote` origin stamp, while the shipped WriteOrigin vocabulary in src/types.ts names `sync-pull` for exactly this channel. Which is normative is unresolved; this spec follows ADR-006."
-
-open question "Device-local flag spelling: §5 excludes device-local types via `sync: false` on defineEntity, while the shipped EntityDefinition carries `local?: boolean`. The behaviour is agreed; the name is not."
-
-open question "Unregistered or device-local entity types arriving on the pull channel: ADR-006 says nothing about what the coordinator does when a RemoteChange names a type the client has not registered, or one the client considers device-local."
+open question "Priority-tiered hydration: named as open in ADR-006 Consequences. PullResult has no priority field and the coordinator has no notion of tiers. rev d D5 gave partitions an opaque name, which is where a tier would attach if this is ever built."
