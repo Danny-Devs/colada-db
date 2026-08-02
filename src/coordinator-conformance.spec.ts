@@ -27,6 +27,7 @@ import {
   tick,
 } from "./coordinator-conformance";
 import { SYNC_CONTRACT_COVERAGE } from "./sync-conformance";
+import type { SyncAdapter } from "./sync-types";
 import type { EntityStore } from "./types";
 
 function localWrite(
@@ -90,14 +91,20 @@ describe("OutboxIsKeyedByClientAndSeq", () => {
     expect(second.data).toBeUndefined();
   });
 
-  it("a settlement-only signal with no store write never reaches the outbox", async () => {
-    // Confirms the tap is store.subscribe(origin), not TransactionSettledEvent —
-    // a bare settlement notification (no entity write) cannot exist as a store
-    // event at all, so the absence of any push call after zero writes IS the proof.
+  it("only local-mutation writes enter the outbox — an accept-list, not a deny-list", async () => {
+    // Falsifies the deny-list mutant (`origin !== "sync-pull"`), the exact anti-pattern the
+    // ticket and ADR name: writes stamped with OTHER origins — and unstamped writes, which
+    // carry no origin at all — must be excluded too. This replaced a test that booted, wrote
+    // nothing, and asserted zero pushes, which passes against any implementation whatsoever
+    // (review gauntlet, DAN-776). Watched to fail against the deny-list mutant.
     const store = freshStore();
     const scripted = makeScriptedAdapter();
-    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    store.runWith({ origin: "query-response" }, () => store.set("Widget", "w1", { id: "w1", label: "cached" }));
+    store.runWith({ origin: "undo" }, () => store.set("Widget", "w2", { id: "w2", label: "undone" }));
+    store.set("Widget", "w3", { id: "w3", label: "unstamped" });
     await tick();
+    expect(handle.getPendingCount()).toBe(0);
     expect(scripted.pushCalls).toHaveLength(0);
   });
 });
@@ -684,5 +691,151 @@ describe("rev c C2-1 / C2 — the coordinator's own model stays cursor-and-subsc
     scripted.emitLive({ type: "poke" });
     await tick();
     expect(compareVersions).toHaveBeenCalledWith("weird-token", 1);
+  });
+});
+
+describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => {
+  it("does not revert over remote truth that landed while the push was in flight", async () => {
+    // Executed failure scenario from the review: w1=A@v1 → local edit B (push held in
+    // flight) → pull applies C@v5 → verdict `reject` reverts to A. Because `versions`
+    // still holds v5, a re-pull of the identical C@v5 classifies as "same" and is
+    // skipped — the store diverges from the server until the entity changes again.
+    // The revert must be gated on the entry's basis still being the store's basis.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePull(
+      {
+        type: "changes",
+        changes: [remoteChange({ data: { id: "w1", label: "A" }, version: 1 })],
+        cursor: "1",
+        complete: true,
+      },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "A" });
+
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ results: batch.map((c) => ({ mutationId: c.mutationId, status: "reject" as const })) });
+        }),
+    );
+    localWrite(store, "Widget", "w1", { id: "w1", label: "B" });
+    await tick();
+    expect(scripted.pushCalls).toHaveLength(1); // in flight, verdict held
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "C" }, version: 5 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C" });
+
+    release();
+    await tick();
+    // The late reject must not resurrect A — the mutation's basis (v1) no longer exists.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C" });
+  });
+
+  it("still reverts normally when no remote change landed mid-flight", async () => {
+    // The gate must not break the ordinary reject path: basis unchanged ⇒ revert happens.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePull(
+      {
+        type: "changes",
+        changes: [remoteChange({ data: { id: "w1", label: "A" }, version: 1 })],
+        cursor: "1",
+        complete: true,
+      },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    scripted.queuePush((batch) => ({
+      results: batch.map((c) => ({ mutationId: c.mutationId, status: "reject" as const })),
+    }));
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    await tick();
+    localWrite(store, "Widget", "w1", { id: "w1", label: "B" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "A" });
+  });
+});
+
+describe("pull bound — an adapter that never sets complete (review gauntlet, DAN-776)", () => {
+  it("hits the 200-iteration bound without applying the partial pages", async () => {
+    // The pathological adapter the bound exists to defend against must not have its
+    // accumulated partial snapshot applied when the bound fires —
+    // StagedBatchesAreNotApplied has no bound-shaped exception.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    let page = 0;
+    scripted.queuePull(() => {
+      page += 1;
+      return {
+        type: "changes" as const,
+        changes: [remoteChange({ data: { id: "w1", label: `partial-${page}` }, version: page })],
+        cursor: String(page),
+        complete: false,
+      };
+    });
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    await tick();
+    await tick();
+    expect(scripted.pullCalls.length).toBeGreaterThanOrEqual(200);
+    expect(store.get("Widget", "w1").value).toBeUndefined();
+  });
+});
+
+describe("poll mode — one self-perpetuating chain, fully torn down (review gauntlet, DAN-776)", () => {
+  it("polls once per interval, and stop() leaves no timer behind", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = freshStore();
+      const scripted = makeScriptedAdapter();
+      const { subscribe: _live, ...pollOnly } = scripted.adapter;
+      const handle = boot(store, { adapter: pollOnly as SyncAdapter, clientId: "client-a" });
+      await vi.advanceTimersByTimeAsync(0); // boot pull completes, scheduling the next cycle
+      const afterBoot = scripted.pullCalls.length;
+      await vi.advanceTimersByTimeAsync(30_000); // one default poll interval
+      // A doubled chain (boot-time schedulePoll + completion-time schedulePoll) fires twice here.
+      expect(scripted.pullCalls.length).toBe(afterBoot + 1);
+      handle.stop();
+      // A second chain also leaks its pending timer past stop(), since pollTimer is one slot.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("SchemaVersionError detection is name-based, never message-text matching (review gauntlet, DAN-776)", () => {
+  it("a transient error whose message merely mentions SchemaVersionError retries — it does not suspend", async () => {
+    // A proxy relaying a server stack trace can put the string "SchemaVersionError" in any
+    // error's message. Suspending on that match turns a retryable blip into a permanently
+    // suspended outbox that only a manual resumeAfterSchemaMigration() call would revive.
+    vi.useFakeTimers();
+    try {
+      const store = freshStore();
+      const scripted = makeScriptedAdapter();
+      scripted.queuePush(new Error("upstream proxy relayed: SchemaVersionError at server/frame.ts:12"), (batch) => ({
+        results: batch.map((c) => ({ mutationId: c.mutationId, status: "ack" as const, version: 1 })),
+      }));
+      const handle = boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+      localWrite(store, "Widget", "w1", { id: "w1", label: "x" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scripted.pushCalls.length).toBe(1);
+      expect(handle.getRetryState().suspendedForSchema).toBe(false);
+      await vi.advanceTimersByTimeAsync(2000); // well past the first backoff's 1s cap
+      expect(scripted.pushCalls.length).toBe(2); // it retried instead of suspending
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

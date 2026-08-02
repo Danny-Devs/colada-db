@@ -48,6 +48,25 @@ than this file's older `[feat]`/`[fix]` tags.
   resume (`resumeAfterSchemaMigration()` added — D12 says a mismatch suspends the outbox but never
   says how suspension lifts, and the coordinator cannot detect an app-level migration on its own).
 
+  **Four more defects found by the landing gauntlet's second fresh-context review, all fixed here
+  before merge** (each new test watched to fail against the unfixed coordinator first): a `reject`
+  verdict arriving after a pull had applied a newer version reverted the store to commit-time
+  `previousData` anyway — and because `versions` kept the newer stamp, the identical re-pull
+  classified as "same" and was skipped, so the store diverged from the server *permanently* (the
+  revert is now gated on the entry's `baseVersion` still being the store's remote basis); the
+  200-iteration pull bound *applied* its accumulated incomplete pages when an adapter never set
+  `complete: true` — the exact pathological adapter the bound defends against — violating
+  StagedBatchesAreNotApplied (bound-hit now discards, rewinds the cursor to the cycle start, and
+  retries with backoff; the thrown-`pull()` path had the same cursor leak — earlier successful
+  pages' changes were skipped past forever — and rewinds now too); poll-mode boot started **two**
+  self-perpetuating poll chains (permanent 2× poll rate) of which one timer survived `stop()`; and
+  `SchemaVersionError` detection matched the string anywhere in the message
+  (`/SchemaVersionError/.test(String(err))`), so a proxy relaying a server stack trace would
+  permanently suspend the outbox on a retryable blip — now name-based. The review also replaced a
+  test that asserted nothing (boot, zero writes, expect zero pushes — green against any
+  implementation) with one that falsifies the deny-list origin filter (`origin !== "sync-pull"`),
+  verified red against exactly that mutant. Suite 557 → 562.
+
 - **Pagination is tested. It shipped in `0.1.0` untested, and nobody could tell.**
   `cursorPagination`, `offsetPagination` and `relayPagination` have been exported
   from `index.ts` since extraction — with **no test anywhere in this repository.**

@@ -106,7 +106,9 @@ export interface EnableSyncOptions {
    * exactly as committed. Never invoked again — adoption is boot-time only.
    */
   recoverStrandedOutbox?: () => StrandedOutboxEntry[] | Promise<StrandedOutboxEntry[]>;
-  /** Poll interval when the adapter has no live `subscribe()` channel. Default 30s. */
+  /** Interval between pull cycles — the poll cadence when the adapter has no live `subscribe()`
+   *  channel, and a background re-pull cadence alongside one (D16 licenses the live channel to
+   *  be lossy, so polling next to it is a safety net, not a contradiction). Default 30s. */
   pollIntervalMs?: number;
 }
 
@@ -260,11 +262,25 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
 
   /** ADR-006 "Implementation note, part 2" — revert to previousData, then replay any OTHER
    *  still-outstanding entry for the same key, in outbox order, so a second in-flight writer's
-   *  edit is never silently erased by the first writer's rejection. */
+   *  edit is never silently erased by the first writer's rejection.
+   *
+   *  The revert is VERSION-GATED (review gauntlet, DAN-776): commit-time `previousData` is only
+   *  authoritative while the store's remote basis for this key is still the entry's own
+   *  `baseVersion`. If a pull advanced it while the push was in flight, the store already holds
+   *  newer server truth — reverting over it diverges from the server PERMANENTLY, because
+   *  `versions` keeps the newer stamp, so a re-pull of that same version classifies as "same"
+   *  and is skipped. Sibling replay still runs either way. */
   function revertAndReplay(rejected: OutboxEntry): void {
     store.runWith({ origin: "undo" as WriteOrigin, transactionId: rejected.transactionId }, () => {
-      if (rejected.previousExisted) applyReplaceOrRemove(rejected.entityType, rejected.id, rejected.previousData);
-      else store.remove(rejected.entityType, rejected.id);
+      const known = versions.get(toKey(rejected.entityType, rejected.id));
+      const basisUnchanged =
+        known === undefined
+          ? rejected.baseVersion === undefined
+          : rejected.baseVersion !== undefined && compareVersions(known, rejected.baseVersion) === "same";
+      if (basisUnchanged) {
+        if (rejected.previousExisted) applyReplaceOrRemove(rejected.entityType, rejected.id, rejected.previousData);
+        else store.remove(rejected.entityType, rejected.id);
+      }
       replaySiblings(rejected.entityType, rejected.id, rejected);
     });
   }
@@ -339,7 +355,11 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         if (entry) handleVerdict(entry, verdict);
       }
     } catch (err) {
-      if (err instanceof SchemaVersionError || /SchemaVersionError/.test(String(err))) {
+      // Name-based, never message-text matching: a proxy relaying a server stack trace can put
+      // the string "SchemaVersionError" in any error's message, and suspending on that would
+      // turn a retryable blip into a permanently suspended outbox. The `.name` check still
+      // catches cross-realm instances `instanceof` misses. (review gauntlet, DAN-776)
+      if (err instanceof SchemaVersionError || (err instanceof Error && err.name === "SchemaVersionError")) {
         // D12 — suspend the outbox; never drain or discard it.
         pushSuspendedForSchema = true;
         retryState.suspendedForSchema = true;
@@ -431,6 +451,12 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     const state = subStates.get(subName);
     if (!state || stopped || state.pullInFlight) return;
     state.pullInFlight = true;
+    // Snapshot for the two non-complete outcomes (thrown pull, bound-hit): staged pages are
+    // discarded AND the cursor rewinds to the cycle's start, so the discarded pages' changes are
+    // re-pulled next cycle rather than silently skipped past (the per-page `pullOnce` advances
+    // the cursor as it accumulates). Version-aware apply makes the re-pull idempotent.
+    // (review gauntlet, DAN-776)
+    const cycleStartCursor = state.cursor;
     try {
       pendingByChangesRef.set(subName, []);
       let status: "more" | "done" | "reset" | "stopped" | "error" = "more";
@@ -441,8 +467,11 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       }
       if (status === "stopped") return;
 
-      if (status === "error") {
+      if (status === "error" || status === "more") {
+        // "more" here means the bound fired — the adapter never set `complete: true`.
+        // StagedBatchesAreNotApplied has no bound-shaped exception: discard, rewind, retry.
         pendingByChangesRef.delete(subName);
+        state.cursor = cycleStartCursor;
         if (stopped) return;
         state.pullRetryAttempt += 1;
         const delay = pushBackoffDelay(state.pullRetryAttempt); // same exponential+jitter shape as D9
@@ -491,9 +520,11 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         void pullSubscription(s.name);
       });
     }
-  } else {
-    for (const s of orderedSubs) schedulePoll(s.name);
   }
+  // Poll-mode boot needs no schedulePoll here: each boot pull below schedules the next cycle on
+  // completion, giving exactly one self-perpetuating chain per subscription. A second boot-time
+  // chain doubled the poll rate forever and leaked its pending timer past stop(), since
+  // `pollTimer` is a single slot. (review gauntlet, DAN-776)
 
   // D20 — starts requested in priority order; none of these are awaited before the next starts.
   for (const s of orderedSubs) void pullSubscription(s.name);
