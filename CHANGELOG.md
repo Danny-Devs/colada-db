@@ -10,6 +10,49 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **The SyncAdapter conformance kit — the spec stops being a document.**
+  `src/sync-conformance.ts` exports `runSyncAdapterContract()`, one contract
+  suite any third-party adapter author can run against their own backend, plus
+  `src/sync-types.ts` carrying ADR-006 rev d's frozen wire contract as
+  TypeScript for the first time. 37 new tests; the suite goes from 443 to 480.
+
+  **The gap it closes was measurable.** `docs/specs/sync-adapter.allium` says in
+  its own header that it was written so an executable conformance kit could be
+  generated from it, and nothing had. Running `allium plan` shows why that
+  mattered: the spec yields 157 test obligations and **the `@invariant` blocks on
+  `contract SyncTransport` produce none of them** — only `contract_signature`
+  obligations come out of a contract, so the prose inside an `@invariant` is
+  documentation the tooling never turns into a check. That is the same defect
+  this repo already has lessons about, one level up: a rule nothing fires, an
+  invariant nothing establishes. This kit is the mechanism that makes those
+  invariants binding on an adapter.
+
+  **It had to exist before `restAdapter`, not after.** An adapter shipped first
+  passes because it passes — correct behaviour gets defined by implementation,
+  one level below the contract that was just frozen to prevent exactly that.
+  With the kit first, the first adapter is *proven* to conform rather than
+  definitionally conforming, and so is every adapter after it.
+
+  **Watched to fail, and it caught its own defect doing so.** Pointing the kit at
+  a deliberately broken adapter turned six properties red — and revealed that
+  `honours limit as a ceiling` was reporting PASS against an adapter that
+  over-serves `limit`, because an early `return` inside the `it` body ran when
+  the optional `seedRemote` hook was absent. A bare `return` ends a Vitest test
+  successfully, so the kit was reporting conformance on a question it never
+  evaluated. Guards moved to describe-level `it.skip`, so an unexercised property
+  is visible instead of counted as a pass.
+
+  Coverage is declared rather than inferred from absence: `SYNC_CONTRACT_COVERAGE`
+  names which obligations the kit checks, which belong to the unbuilt coordinator
+  and cannot be observed from outside an adapter, and which need a real backend
+  over real time. A reader finding `AtMostOnePushInFlightPerClient` in the
+  coordinator list is being told it is real and somebody else's to honour, not
+  that it was forgotten.
+
+  Neither new module is re-exported from `src/index.ts` — ADR-022 lines 1 and 2,
+  the same rule `engine-conformance.ts` follows. Verified rather than assumed:
+  the pack manifest still reports 11 entries and the API report still matches.
+
 - **`.coderabbit.yaml` — the automated reviewer is now configured, because it
   became a merge gate.** CodeRabbit has reviewed every PR here since #10 on
   defaults, which was harmless while CI was advisory. It is not harmless now:
