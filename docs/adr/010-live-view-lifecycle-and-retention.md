@@ -1,6 +1,7 @@
 # ADR-010: Live Matcher-View Lifecycle — Ids, View-Local Retention, Deferred Divergence Guard
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-20
 
 ## Context

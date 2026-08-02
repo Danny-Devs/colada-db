@@ -1,6 +1,7 @@
 # ADR-012: `clear()` Removes Exactly Its Snapshot — Reentrant Writes Survive
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-21
 
 ## Context

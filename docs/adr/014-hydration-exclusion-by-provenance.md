@@ -1,6 +1,7 @@
 # ADR-014: Hydration Exclusion by Provenance, Not Coordinator Phase
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-21
 
 ## Context

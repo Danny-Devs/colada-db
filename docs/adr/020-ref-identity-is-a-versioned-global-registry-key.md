@@ -1,6 +1,7 @@
 # ADR-020: Ref Identity Is a VERSIONED Global Registry Key, and Encode Validates What Decode Validates
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-23
 
 > **Numbering note.** Drafted as ADR-019 on the DAN-649 branch. DAN-656 landed

@@ -1,6 +1,7 @@
 # ADR-007: AI-First From the Cornerstone
 
 **Status:** Accepted
+**Implementation:** in-progress
 **Date:** 2026-07-12
 
 ## Context

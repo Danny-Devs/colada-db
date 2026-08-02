@@ -1,6 +1,7 @@
 # ADR-021: CI is the gate of record, and the Node matrix splits toolchain floor from artifact floor
 
 **Status:** Accepted — **enforcement PENDING, see "Enforcement status" below**
+**Implementation:** in-progress
 **Date:** 2026-07-23
 **Context ticket:** DAN-658
 

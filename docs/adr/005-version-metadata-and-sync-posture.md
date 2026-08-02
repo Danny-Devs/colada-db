@@ -1,6 +1,7 @@
 # ADR-005: Version Metadata Slot + Sync Posture (cr-sqlite Is Dead)
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-12
 
 ## Context

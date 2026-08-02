@@ -1,6 +1,7 @@
 # ADR-019: colada-db Owns Its Public Read Type (`ColadaRef`)
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-23
 
 ## Context

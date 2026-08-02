@@ -1,6 +1,7 @@
 # ADR-009: Serializable Matcher AST with Fail-Closed Classification
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-20
 
 > Numbering note: the roadmap (Phase 1.3) informally referred to a future

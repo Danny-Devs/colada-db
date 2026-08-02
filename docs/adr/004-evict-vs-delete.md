@@ -1,6 +1,7 @@
 # ADR-004: Evict (Memory-Only) vs Remove (Semantic Delete)
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-12
 
 ## Context

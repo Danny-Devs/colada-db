@@ -1,6 +1,7 @@
 # ADR-016: The Optimistic Mask Covers PUTs Too — and the Foreign-Write Boundary
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-21
 **Amends:** ADR-015 (rule 4: the mask was delete-only; it now covers any
 buffered op, and its precedence vs. confirmed writes is named)

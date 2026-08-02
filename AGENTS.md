@@ -1,3 +1,12 @@
+---
+title:       Working in the colada-db repo
+kind:        howto
+status:      active
+updated:     2026-08-01
+owner:       danny
+verified_by: "N/A — narrative"
+---
+
 # AGENTS.md — colada-db
 
 Codebase manual for any agentic workflow touching this repo.

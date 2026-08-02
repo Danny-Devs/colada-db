@@ -1,6 +1,7 @@
 # ADR-017: The Dispose Final Flush Survives Its Own `disposed` Guard
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-22
 **Amends:** ADR-014 (the "dispose() racing boot and unload MUST flush
 acknowledged dirt" boundary) — the flush that boundary depends on was itself

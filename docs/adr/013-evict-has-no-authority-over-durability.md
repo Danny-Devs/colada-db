@@ -1,6 +1,7 @@
 # ADR-013: Eviction Has No Authority Over the Durability Pipeline
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-21
 **Amends:** ADR-004 (one subscriber-rule clause: "drops any pending save;
 last flushed value stands" — the evict/remove split itself is untouched)

@@ -1,6 +1,7 @@
 # ADR-003: SQLite Is a Durability Substrate, Not a Store Swap
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-12
 
 ## Context

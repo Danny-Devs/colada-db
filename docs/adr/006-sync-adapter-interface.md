@@ -1,7 +1,9 @@
 # ADR-006: The SyncAdapter Interface (Stage-3 Contract, Frozen Early)
 
 **Status:** Proposed (interface frozen; implementation is Phase-4 Stage 3)
+**Implementation:** not-started
 **Date:** 2026-07-12 · **Revised same day (rev b):** contract upgraded to v2 after a battle-test against seven production sync systems (Replicache, PowerSync, Electric, RxDB, TanStack DB, LiveStore, Evolu) surfaced 12 gaps, 3 critical — full analysis in `../../../knowledge/steal-list-sync-engines.md`. Revision permitted: ADR still Proposed.
+· **Revised 2026-07-24 (rev c):** vendor-landscape pass (not protocol — rev b covered protocol) corrected the adapter roadmap and added three door-keeping constraints. See "Rev c" section below. Sources: `../../../knowledge/sync-landscape-2026-07.md` and `../../../knowledge/decentralized-backend-2026-07-24.md`.
 
 ## Context
 
@@ -96,12 +98,58 @@ interface SyncAdapter {
 
 ### Adapter roadmap
 
-`restAdapter` (reference implementation + the documented protocol for any custom backend) → `powerSyncAdapter` (client SDK is Apache-2.0; their service is self-hostable) → `tursoAdapter` (re-evaluate at their 1.0).
+~~`restAdapter` → `powerSyncAdapter` (client SDK is Apache-2.0; their service is self-hostable) → `tursoAdapter` (re-evaluate at their 1.0).~~ **Superseded by rev c below** — the PowerSync reasoning was sound on licensing and wrong on layering.
+
+**Current roadmap (rev c, 2026-07-24):** `restAdapter` (reference implementation + the documented protocol for any custom backend) → `electricAdapter` (read-path only: fills `pull()`/`subscribe()`, leaves `push()` to the outbox) → re-evaluate.
+
+## Rev c (2026-07-24) — adapter roadmap correction + three door-keeping constraints
+
+A vendor-landscape pass (distinct from rev b, which was protocol-level) produced one correction and three constraints. Full evidence, with primary-source citations and measured maturity signals, in `../../../knowledge/sync-landscape-2026-07.md`.
+
+### C1. The layering finding: most sync engines are rivals, not transports
+
+Rev b's roadmap assumed sync engines are *transports* that can sit behind this adapter. Verified against primary docs 2026-07-24: for most of the field that is false. Zero, PowerSync, LiveStore, Jazz, InstantDB and Triplit each own the client store, the query layer, and the outbox — they *are* what colada-db is. Adopting one is replacement, not integration.
+
+**PowerSync specifically** — the rev-b reasoning ("client SDK is Apache-2.0, service self-hostable") remains factually correct, but does not add up to a workable adapter: PowerSync's client SDK manages **its own local SQLite database and its own upload queue**, duplicating the outbox this ADR's §1 builds on. An adapter means either two stores and two outboxes, or bypassing their client and speaking the raw protocol from our coordinator. The first is incoherent; the second forfeits most of the reason to pick PowerSync. It is a well-engineered system (causal+ consistency, Jepsen-verified) that is a poor fit for *this role*.
+
+**Electric takes that slot** because it is the only significant engine in the field that is read-path only. Per its own docs: *"Electric does read-path sync... Electric does not do write-path sync."* It fills `pull()` and `subscribe()` and leaves `push()` to the machinery in §1, which is a complement rather than a contest. Apache-2.0, fully self-hostable, plain HTTP that works through CDNs, and no auth model of its own (you proxy and authorize the request), so no identity lock-in is inherited.
+
+**Licensing note for the open-core plan:** PowerSync's *service* is FSL-1.1-ALv2 (raw LICENSE read 2026-07-24), whose "Competing Use" clause bars offering a commercial product that substitutes for it. Shipping an adapter against a user's own deployment is a Permitted Purpose; building a hosted colada-db sync service on PowerSync Service is not, until the 2-year Apache-2.0 conversion has elapsed for the relevant version. Their *client SDKs* are Apache-2.0.
+
+### C2. Three constraints that keep the decentralized path open
+
+Danny's standing direction (2026-07-24): pursue the decentralized lane if it is competitive; otherwise ship the traditional way but **design so we can move**, coupled to no vendor. These three constraints are what "able to move" costs. All are cheap now, before the coordinator exists, and expensive after.
+
+1. **Partial-sync selection must stay client-side-expressible. Core never learns what a server-side shape is.** This is the sharpest one-way door found. Electric's Shape is *"a SQL query against your Postgres"* and Zero's ZQL runs server-side against a replica — both evaluate predicates over **plaintext**, which a server that cannot decrypt your data can never do. If that model reaches the coordinator, E2EE is foreclosed permanently and no future adapter recovers it. Server-evaluated shapes are permitted **inside the Electric adapter only**; the coordinator's model of "what do I have, what am I missing" stays cursor-and-range shaped, which `PullResult` already is. (Observed in the wild: Walrus Memory needed server-side semantic search, so its server must read user data, so its E2EE property was spent.)
+
+2. **Version comparison routes through a single adapter-supplied comparator.** ADR-005 §1 correctly made `version` opaque and backend-supplied. The narrow gap: a scalar orders **totally**, while CRDT causality needs a **partial** order (vector clock / Lamport-plus-actor). A vector clock can be smuggled into the `string` case, but then "is this newer" stops being a numeric comparison. Every `>` on a version is a site that would otherwise need changing later. Default the comparator to numeric/lexicographic; let an adapter override it.
+
+3. **`clientId` stays an opaque string. Core never generates or validates its format.** Server-authoritative deployments let a server allocate them; decentralized ones have no server to vouch, so identity must be a **public key** (as in Keyhive and Jazz). The door closes the moment anything assumes clientIds are server-assigned or unique-by-fiat. Cost to keep open: effectively zero, plus a test asserting core never inspects the format.
+
+### C3. What this does NOT change
+
+- **§6 server-authoritative conflict posture stands.** It is not a one-way door: `transform` is an *adapter-level* verdict, and an E2EE relay adapter simply never emits one. The posture lives in the adapter, not the store.
+- **The CRDT tripwire remains unfired.** SweeAI settled on ADOPT, not COLLABORATE (confirmed 2026-07-24). Agents act and then report; publishing an outcome is append-only, which merges by ordering alone.
+- **Requiring Postgres is a deployment lock-in, not an architectural one** — it constrains the app developer's backend, not colada-db's core, and is reversible by writing another adapter.
+
+### C4. The reframe worth keeping
+
+Nobody chose Postgres because it is the best database — they chose it because it ships **logical replication**, an ordered, durable, resumable change feed. That is the single primitive sync requires. PowerSync proves it by supporting exactly the other databases with usable change feeds (MySQL binlog, MongoDB change streams, SQL Server CDC).
+
+Consequence: this contract needs *a cursor over an ordered log*, not Postgres. A Sui object pointing at a chain of Walrus blobs is such a log — the pointer is the cursor, the blob chain is the history. The decentralized backend fits `PullResult` more naturally than much of the centralized field does. Economics force it to be epoch-grained (Walrus bills `4.5 × size + 64 MB` per blob, so per-mutation writes are arithmetically absurd and batching is mandatory), which is fine for the append-only receipt data that is SweeAI's actual product and wrong for live collaborative state, which SweeAI does not have.
+
+### C5. Design note for `restAdapter` — HTTP QUERY (RFC 10008)
+
+Keep `pull()` genuinely side-effect-free, put cursor and predicate in the request **body** rather than the path, and keep responses cacheable. That makes the new HTTP QUERY method — safe, idempotent, *and* cacheable, with a request body — a drop-in when support lands, which buys CDN-cacheable partial sync without adopting a server-evaluated shape model. Do not depend on it yet; the RFC is published but rollout was not measured.
 
 ## Alternatives Considered
 
 - **Adopt a vendor's protocol wholesale (PowerSync's or Electric's):** fastest to one backend, but the plugin's identity is backend-neutrality; the vendor protocol becomes *an adapter*, not *the interface*.
-- **CRDT merge layer:** wrong fit for entity-graph + server-of-record apps (and cr-sqlite is dead — ADR-005); revisit only if a collaboration-editor use case ever becomes primary.
+- **CRDT merge layer:** wrong fit for entity-graph + server-of-record apps (and cr-sqlite is dead — ADR-005); revisit only if a collaboration-editor use case ever becomes primary. **Concrete tripwire (2026-07-23):** SweeAI's `docs/product/ARCHITECTURE.md` open question #1 (graph edge type: feed/fork/collaborate/ambient — "current read: fork is the spine... settle before building") is the real trigger. If that resolves toward **collaborate** as a first-class spine edge instead of fork, re-open this decision — "collaborate" is defined there as "agents from A and B share work, needs multi-party ceiling algebra," which is the collaboration-editor case named above. Until then M0's own scope ("no social, no sharing, no feed") means the trigger has not fired. Candidate library if it does: Automerge (git-like change history maps onto provenance/recency needs directly), Loro as a benchmark-watch alternative — see `core/projects/colada-db-project/knowledge/competitive-landscape-2026-07-23.md`. **Ceiling caveat (council verdict, 2026-07-23):** a CRDT merges data correctly but cannot undo an already-executed overspend against a SHARED mutable ceiling — that's a reservation/partition problem, not a merge problem (Helland's reservation pattern; Miller's object-capability partitioning). If collaborate ships, ceilings must be split into disjoint per-agent sub-grants up front (a one-time, infrequent, atomic allocation step), never modeled as one shared pool renegotiated live — the latter still needs a live arbiter regardless of which CRDT library is chosen.
+
+**Companion decision (2026-07-24):** SweeAI's `docs/adr/001-graph-edge-adopt-as-spine.md` tracks the identical question from the product side (ADOPT vs. COLLABORATE as the graph-edge spine). These two ADRs should be revisited together — a change on one side almost certainly implies a change on the other.
+
+**Status update (2026-07-24):** SweeAI's `SEMANTIC-MODEL.md` "The graph edge — DECIDED (council, 2026-07-23)" confirms **ADOPT**, not collaborate, as the spine — three independent seats, reasoning: "Adopt is the only edge where the kernel is a feature instead of plumbing. Follow, collaborate, and ambient all work fine on a platform with no trust ceiling." This tripwire is confirmed **unfired**, and per that same reasoning, may never fire in the ceiling-sensitive form anticipated above — collaborate is explicitly kernel-decoupled, so it may ship without ever touching mandate/ceiling enforcement at all. (Note: SweeAI's `ARCHITECTURE.md` open-questions list still shows this as unsettled as of the same date — doc drift between two SweeAI files, flagged there, not resolved here.) Re-check this note if SweeAI's docs change again.
 - **Event-sourcing (LiveStore-style):** powerful but demands the app re-model everything as events; violates the drop-in-plugin identity.
 
 ## Consequences

@@ -1,6 +1,7 @@
 # ADR-018: Unify the Persisted Format on `cdb`, Reserve a `formatVersion` Escape Hatch
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-23
 
 ## Context

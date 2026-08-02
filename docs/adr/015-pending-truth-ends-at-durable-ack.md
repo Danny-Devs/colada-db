@@ -1,6 +1,7 @@
 # ADR-015: Pending Truth Ends Only at Durable Acknowledgment — the In-Flight Overlay
 
 **Status:** Accepted
+**Implementation:** shipped
 **Date:** 2026-07-21
 **Amends:** ADR-013 (the "dirty window only" boundary bullet and the
 pendingTx consequences note), ADR-014 (the direct-`flush()` boundary bullet)

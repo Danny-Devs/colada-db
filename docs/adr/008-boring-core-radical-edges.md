@@ -1,6 +1,7 @@
 # ADR-008: Boring Core, Radical Edges (the Port Map)
 
 **Status:** Accepted
+**Implementation:** in-progress
 **Date:** 2026-07-19
 
 ## Context

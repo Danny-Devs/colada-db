@@ -1,6 +1,7 @@
 # ADR-011: Read-Only In-Page MCP Agent Surface — Topology, Allowlist, Deny-by-Default
 
 **Status:** Accepted
+**Implementation:** not-started
 **Date:** 2026-07-20
 
 ## Context
