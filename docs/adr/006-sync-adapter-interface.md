@@ -4,7 +4,7 @@
 **Implementation:** not-started
 **Date:** 2026-07-12 · **Revised same day (rev b):** contract upgraded to v2 after a battle-test against seven production sync systems (Replicache, PowerSync, Electric, RxDB, TanStack DB, LiveStore, Evolu) surfaced 12 gaps, 3 critical — full analysis in `../../../knowledge/steal-list-sync-engines.md`. Revision permitted: ADR still Proposed.
 · **Revised 2026-07-24 (rev c):** vendor-landscape pass (not protocol — rev b covered protocol) corrected the adapter roadmap and added three door-keeping constraints. See "Rev c" section below. Sources: `../../../knowledge/sync-landscape-2026-07.md` and `../../../knowledge/decentralized-backend-2026-07-24.md`.
-· **Revised 2026-08-02 (rev d):** resolved the 18 unresolved points that writing the Allium specification surfaced (`docs/specs/sync-adapter.allium`, DAN-736) — four contradictions between sections, one undefined referent, two ADR-vs-code naming drifts, four unspecified values and seven behavioural silences. Two items stay open by decision. See "Rev d" below. **The types in the Decision block have been edited to match**; every rev-d change to them is purely additive except one deletion of a path that never had a wire representation.
+· **Revised 2026-08-02 (rev d):** resolved **all 20** unresolved points that writing the Allium specification surfaced (`docs/specs/sync-adapter.allium`, DAN-736) — four contradictions between sections, one undefined referent, two ADR-vs-code naming drifts, four unspecified values, seven behavioural silences, and the two this ADR had itself carried as open since rev b. **No open questions remain in this contract**, and each resolution carries a falsification test rather than a hedge. See "Rev d" below. **The types in the Decision block have been edited to match**; every rev-d change to them is purely additive except one deletion of a path that never had a wire representation.
 
 ## Context
 
@@ -37,6 +37,13 @@ interface LocalChange {
   id: string;
   data?: EntityRecord;           // PATCH-style dirty fields preferred over full rows
   baseVersion?: string | number; // version the client last saw (server may use for conflict checks)
+  /** OPTIONAL, rev d / D19. The mutation's INTENT — a named mutator and its args
+   *  (Zero / Replicache style), which a matched client+server pair replays
+   *  server-side for true rebase. `data` stays the required channel because a
+   *  bring-your-own-backend contract cannot assume the server runs client code;
+   *  an adapter that does not understand `intent` ignores it and applies `data`.
+   *  If a replay disagrees with `data`, the server wins and says so via `transform`. */
+  intent?: { name: string; args: unknown };
 }
 
 interface PushResult {
@@ -260,11 +267,45 @@ What replaces the ceiling is **observability, not truncation**: the coordinator 
 
 *Verified: `src/normalize.ts:38,85,98,175`; no `EntityDefinition` reference in `src/store.ts`.*
 
-### What stays open, and why that is a decision too
+### D19 and D20 — the last two, resolved rather than deferred
 
-**19. Named-mutator rebase** (`{name, args}` on `LocalChange`) and **20. priority-tiered hydration** remain open.
+An earlier draft of this section left these open as "additive later, not one-way doors." **That was wrong, and Danny caught it.** The claim is true of the *fields* and false of the *contract*: adding a second way to express a write to a protocol other people's servers already speak means every adapter thereafter must handle both. That is not a deferred decision, it is a permanent wart purchased with a deferral — the exact calcification this ADR was frozen early to prevent.
 
-Both are genuinely additive later and neither is a one-way door — they add fields, they do not change the meaning of existing ones. Resolving them now would mean designing against no implementation and no user, which is how a contract acquires a feature nobody asked for and everybody has to implement. They stay in the Allium spec as `open question` declarations.
+The general form is worth stating, because it governs the next revision too. **The old reason to leave a specification unfinished was that building teaches you things, so learning beat guessing. When implementation is cheap and the thinking is the expensive part, that trade inverts.** A hole in a spec is not humility; it is a decision handed to whoever implements it, who fills it by accident and makes it permanent. What survives from the old instinct is not the blank — it is **writing down what would prove the decision wrong.** Each resolution below carries its falsification test.
+
+**D19. `LocalChange` gains an optional `intent`; `data` stays required.**
+
+```typescript
+interface LocalChange {
+  // ... as above
+  data?: EntityRecord;              // unchanged: the computed patch
+  /** OPTIONAL. The mutation's INTENT — a named mutator and its arguments
+   *  (Zero / Replicache style). A matched client+server pair replays this
+   *  server-side for true rebase. An adapter that does not understand it
+   *  ignores it and applies `data`. */
+  intent?: { name: string; args: unknown };
+}
+```
+
+The fork is whether an outbox entry carries the **result** of a mutation or its **intent**. Intent is strictly more powerful: a server that can replay the named mutator against post-apply state rebases properly, rather than accepting or rejecting a patch computed against stale state.
+
+**What decides it is this plugin's identity, not the power ranking.** Replicache and Zero can require intent because they ship the server — the same mutator code exists on both sides by construction. colada-db's whole premise is bring-your-own-backend, and a REST API someone already operates cannot execute a function from your client bundle. **A contract that requires shared code is not backend-neutral.**
+
+So intent is an adapter-level capability, exactly as `transform` is (§C3: the posture lives in the adapter, not the store). `data` stays required so any backend can apply a change with no shared code; `intent` is an enrichment a matched pair may use. If a replayed intent produces a different result than the submitted `data`, the server wins and reports it through `transform` — the channel already exists, and no new verdict is needed.
+
+*Falsification: if the first two real adapters both populate `intent` and neither meaningfully uses `data`, then `data` was the optional one and this is inverted. If no adapter populates `intent` within a year of `restAdapter` shipping, the field was speculative and should be deprecated rather than left as decoration.*
+
+**D20. Priority is a property of a subscription. No wire field, no coordinator tiers.**
+
+D5 defined subscriptions as independently-cursored named partitions, which is already the whole mechanism: the coordinator issues initial pulls **in declared priority order** and does not wait for one to complete before starting the next.
+
+Not waiting is the load-bearing half. Strictly serial hydration would let one slow high-priority partition block everything behind it — head-of-line blocking, which is a worse failure than unordered hydration and much harder to diagnose. Ordering the *starts* gets the important data moving first without ever letting it stall the rest.
+
+For a phone supervision client this is the difference between "gates render, history fills in" and "wait for everything." **That is a product-visible property obtained with zero additions to the wire**, because D5 had already put the seam in the right place — this ADR simply had not finished the sentence.
+
+*Falsification: if a real client needs priority ordering **within** one partition, then the subscription is the wrong unit and `PullResult` does need a priority field after all.*
+
+**There are now no open questions in this contract.** The Allium spec's Open Questions section is empty by decision, which is a checkable state rather than a claim.
 
 ## Alternatives Considered
 

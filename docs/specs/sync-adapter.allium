@@ -4,16 +4,16 @@
 --
 -- Source of truth: docs/adr/006-sync-adapter-interface.md, frozen at rev d
 -- (2026-08-02). This file is a TRANSCRIPTION of that contract into checkable
--- form, not an improvement on it. Where ADR-006 is deliberately silent, the
--- silence is recorded in the Open Questions section at the bottom rather than
--- resolved by invention.
+-- form, not an improvement on it. As of rev d the ADR is silent nowhere, so the
+-- Open Questions section at the bottom is EMPTY — see it for why that is a
+-- decision rather than an omission.
 --
 -- Rev d history: writing THIS FILE against rev c is what exposed 20 unresolved
 -- points, four of them outright contradictions between ADR sections (DAN-736).
 -- A specification forces every clause to be representable, and four were not.
--- Rev d resolved 18; the two that remain below are open by decision, not by
--- oversight. Every "the spec takes this path" hedge that used to appear in a
--- guidance block is gone — the ADR now says which path, so this file states it.
+-- Rev d resolved ALL TWENTY. Every "the spec takes this path" hedge that used to
+-- appear in a guidance block is gone — the ADR now says which path, so this file
+-- states it, and every resolution carries a falsification test instead.
 --
 -- Companion decisions: ADR-003 (memory projection, not store swap), ADR-004
 -- (evict is not delete), ADR-005 (version metadata slot + server-authoritative
@@ -117,6 +117,21 @@ value LocalChange {
     id: String
     data: EntityData?          -- PATCH-style dirty fields preferred over full rows
     base_version: Version?     -- the version the client last saw
+    -- rev d D19. OPTIONAL. The mutation's INTENT rather than its result: a named
+    -- mutator and its arguments (Zero / Replicache style), which a matched
+    -- client+server pair replays server-side for true rebase. `data` stays the
+    -- REQUIRED channel because a bring-your-own-backend contract cannot assume
+    -- the server runs client code — an existing REST API cannot execute a
+    -- function from your client bundle. An adapter that does not understand
+    -- intent ignores it and applies data.
+    intent: MutationIntent?
+}
+
+-- rev d D19. A named mutator and its arguments. Core never inspects `args`; it
+-- is the adapter's and the backend's shared vocabulary, not this contract's.
+value MutationIntent {
+    name: String
+    args: EntityData?
 }
 
 -- One per-mutation verdict inside a PushResult.
@@ -202,6 +217,30 @@ contract SyncTransport {
         -- require the coordinator to express selection as a predicate, because
         -- a relay that cannot decrypt the data can never evaluate one, and no
         -- future adapter recovers the property once core depends on it.
+
+    @invariant IntentIsOptionalAndDataIsNotOptional
+        -- rev d D19. A LocalChange MAY carry a named-mutator intent; it MUST
+        -- carry data. Intent is strictly more powerful — a server that replays
+        -- the mutator against post-apply state rebases properly instead of
+        -- accepting or rejecting a patch computed against stale state — but
+        -- requiring it would require the SERVER TO RUN CLIENT CODE, and an
+        -- existing REST API cannot execute a function from your bundle. A
+        -- contract that requires shared code is not backend-neutral, and
+        -- backend-neutrality is this plugin's entire identity.
+        --
+        -- So intent is an adapter-level capability, exactly as `transform` is:
+        -- the posture lives in the adapter, not the store. When a replayed
+        -- intent disagrees with the submitted data, the server wins and reports
+        -- it through `transform` — no new verdict is needed.
+
+    @invariant HydrationPriorityOrdersStartsAndNeverBlocks
+        -- rev d D20. Initial pulls are ISSUED in subscription priority order and
+        -- are NOT awaited. Ordering the starts gets the important partition
+        -- moving first; WAITING for it would let one slow high-priority
+        -- partition stall everything behind it — head-of-line blocking, a worse
+        -- failure than unordered hydration and far harder to diagnose. Priority
+        -- adds nothing to the wire: D5 had already put the seam in the right
+        -- place by making partitions independently cursored.
 
     @invariant SubscriptionIsAnOpaqueNameOwnedByTheAdapter
         -- rev d D5, resolving what a subscription IS. A subscription is a
@@ -385,6 +424,12 @@ entity SyncCoordinator {
 entity SyncSubscription {
     adapter: SyncAdapter
     selection: PullSelection
+    -- rev d D20. Priority-tiered hydration lives HERE and nowhere else: it is a
+    -- property of a partition, not a field on the wire and not a notion the
+    -- coordinator holds separately. Initial pulls are ISSUED in priority order
+    -- and are NOT awaited — see rule BeginPull's guidance for why not waiting is
+    -- the load-bearing half. Lower number = pulled first.
+    hydration_priority: Integer
     cursor: Cursor?
     status: idle | pulling | staging | applying | resetting | stopped
     pending_batch_complete: Boolean
@@ -715,6 +760,11 @@ rule ConfirmOnPulledMutationMark {
 rule BeginPull {
     when: PullRequested(subscription)
     requires: subscription.status = idle
+    -- rev d D20. On initial hydration the coordinator issues these in ascending
+    -- hydration_priority and DOES NOT AWAIT completion between them. Ordering
+    -- the starts is what gets gates on a phone screen before history backfills;
+    -- awaiting would turn one slow partition into a stall for every partition
+    -- behind it. Not waiting is the load-bearing half of this decision.
     ensures:
         subscription.status = pulling
         PullDispatched(
@@ -1101,24 +1151,32 @@ surface LocalWriteBoundary {
 -- Open Questions
 ------------------------------------------------------------
 
--- ADR-006 rev d (2026-08-02) RESOLVED 18 of the 20 questions this section used
--- to carry. They are deleted rather than annotated: a resolved question left in
--- place reads as still-open to the next reader, and the ADR is now the asserter.
--- The resolutions are D1-D18 in the "Rev d" section of
--- docs/adr/006-sync-adapter-interface.md, and each one names the rule, contract
--- invariant or config value in THIS file that carries it.
+-- NONE. This section is empty by decision, and that emptiness is the point.
 --
--- Writing this section against rev c is what made those 18 visible. Re-reading
--- the ADR would not have: prose tolerates a clause with no referent, and a
--- specification does not. Four of them were outright contradictions between ADR
--- sections, and `allium analyse` independently flagged one as a dead trigger.
+-- ADR-006 rev d (2026-08-02) resolved all 20 questions this section carried.
+-- Eighteen came from writing this file against rev c: prose tolerates a clause
+-- with no referent and a specification does not, so transcribing the contract
+-- exposed four outright contradictions between ADR sections and one dead
+-- trigger `allium analyse` found on its own. The last two -- named-mutator
+-- rebase (D19) and priority-tiered hydration (D20) -- had been carried as open
+-- by the ADR itself since rev b, and a rev-d draft nearly carried them again as
+-- "additive later, not one-way doors."
 --
--- The two below remain open BY DECISION, not by oversight. Both are additive
--- later and neither is a one-way door — they would add fields, not change the
--- meaning of existing ones. Resolving them now would mean designing against no
--- implementation and no user, which is how a contract acquires a feature nobody
--- asked for and every adapter author has to implement.
-
-open question "Named-mutator rebase: ADR-006 Consequences lists `{name, args}` on LocalChange (Zero-style shared mutators) as an open item. LocalChange as frozen carries data, not an intent. Additive when a real rebase requirement appears; rev d declined to invent one."
-
-open question "Priority-tiered hydration: named as open in ADR-006 Consequences. PullResult has no priority field and the coordinator has no notion of tiers. rev d D5 gave partitions an opaque name, which is where a tier would attach if this is ever built."
+-- That justification was wrong and is worth recording here, because this is the
+-- file where the temptation recurs. It is true of the FIELDS and false of the
+-- CONTRACT: adding a second way to express a write to a protocol other people's
+-- servers already speak forces every adapter thereafter to handle both. A
+-- deferral does not avoid that cost; it buys it at a worse price later.
+--
+-- The general rule, which governs whatever revision comes next:
+--
+--   The old reason to leave a specification unfinished was that BUILDING
+--   TEACHES YOU THINGS, so learning beat guessing. When implementation is cheap
+--   and the thinking is the expensive part, that trade inverts. A hole in a spec
+--   is not humility -- it is a decision handed to whoever implements it, who
+--   will fill it by accident and make it permanent.
+--
+-- What survives from the old instinct is not the blank. It is writing down what
+-- would prove the decision WRONG. Every D-numbered resolution in ADR-006 rev d
+-- carries a falsification test instead of a hedge, and a resolution whose test
+-- fires is how this section legitimately gets a new entry.

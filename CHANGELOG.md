@@ -100,6 +100,32 @@ than this file's older `[feat]`/`[fix]` tags.
   `local?: boolean` (not `sync: false`). These read like coin flips until you
   notice one side of each is on npm.
 
+  **The contract now has no open questions, and the last two are why that
+  matters.** A first draft of rev d left named-mutator rebase and priority-tiered
+  hydration open, justified as "additive later, not one-way doors." That is true
+  of the *fields* and false of the *contract*: adding a second way to express a
+  write to a protocol other people's servers already speak forces every adapter
+  thereafter to handle both — a permanent wart bought with a deferral, which is
+  the exact calcification freezing this contract early was meant to prevent.
+
+  `LocalChange` gains an optional `intent: { name, args }` while `data` stays
+  required. Intent is strictly more powerful — a server replaying a named mutator
+  against post-apply state rebases properly rather than judging a patch computed
+  against stale state — but requiring it would require the server to run client
+  code, and an existing REST API cannot execute a function from your bundle. A
+  contract that requires shared code is not backend-neutral, and that is this
+  package's whole identity. So intent is an adapter-level capability, exactly as
+  `transform` is.
+
+  Priority-tiered hydration needed **no wire field at all**: priority is a
+  property of a subscription, and initial pulls are issued in priority order
+  without being awaited. Ordering the starts is what puts gates on a phone screen
+  before history backfills; awaiting would let one slow partition stall every
+  partition behind it.
+
+  Each resolution now carries a **falsification test** rather than a hedge — the
+  thing that makes a decision complete without pretending it is certain.
+
 - **AGENTS.md no longer describes the pre-publish world.** Three claims went
   stale the moment 0.1.0 shipped, in the first file every agent reads: CI was
   described as ADVISORY with a 403 receipt (it is now blocking, six required
