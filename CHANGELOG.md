@@ -1,5 +1,82 @@
 # Changelog
 
+## [Unreleased]
+
+Findings from an independent pre-publish review, run as a fresh reviewer against
+ADR-022's six irreversibility lines. Two real defects on the lines themselves,
+both fixed here; the rest are first-run and disclosure gaps. Recorded with the
+six Keep-a-Changelog types (the workspace convention as of 2026-08-01) rather
+than this file's older `[feat]`/`[fix]` tags.
+
+### Fixed
+
+- **The persisted-format stamp did not reach the common case (ADR-018, ADR-022
+  line 1).** `formatVersion` is the only escape hatch the on-disk format has,
+  it lives in the manifest index row, and that row was materialized **only when
+  `setManifest`/`removeManifest` had been called.** So every database created
+  on the default `hydration: "all"` path — exactly what the README quickstart
+  teaches — was written with no version marker anywhere on disk. The read side
+  was never the gap: both boot paths already parse and skip the index row, so
+  only the write side was conditional. The row is now stamped on the first
+  flush that persists anything; a coordinator that persists nothing still
+  writes nothing. Four tests in `src/format-version.spec.ts`, watched to fail
+  first (3 of 4 red with the fix reverted, while the "persists nothing"
+  negative control stayed green in both directions).
+- **A dotted matcher field silently matched nothing.** `M.eq("a.b", 2)` against
+  `{ a: { b: 2 } }` returns `false` — fields are flat own-property names and
+  there is no path traversal. Behavior is unchanged and deliberate (an entity
+  may own a key containing a dot; reserving the character would make that key
+  unfilterable), but the only thing asserting it was prose, and the failure is
+  silent — on the agent surface a nested-intent filter reads as a confident
+  "no matches". Now stated in the `matcher.ts` module docs, on `M`, and in
+  `docs/design/matcher-semantics.md`, and pinned by three tests.
+
+### Changed
+
+- **`StorageEngine`'s `version` slot widened to `string | number`** (ADR-022
+  line 2), matching `EntityEvent.version`. It was `number` while the event
+  allowed both — even though the engine's own JSDoc names a *server timestamp*
+  as a legitimate source, and the causal stamp it eventually wants would most
+  likely be a hybrid logical clock. Both are strings. With the `version`
+  semantic still open under DAN-736, the narrower type would have decided it by
+  accident in the one direction publish makes unfixable: widening a return type
+  afterwards breaks every consumer that reads it. No code anywhere performed
+  arithmetic on it. `etc/colada-db.api.md` regenerated in the same commit — the
+  gate caught the change and named the exact line before it was updated.
+- **README quickstart now compiles.** `contact.value.name` failed `TS18048:
+  'contact.value' is possibly 'undefined'` under `--strict` — the first code a
+  new consumer copies, in the file npm renders as the landing page. Also added
+  the two things it never showed: `EntityRegistry` module augmentation (the
+  mechanism that makes reads typed rather than `Record<string, unknown>`), and
+  an actual normalization example — the headline capability had no code in the
+  README at all. Every snippet is now compiled against the packed tarball under
+  both `bundler` and `nodenext` resolution.
+- **`prepublishOnly` runs the whole workspace and the durability lane.** It ran
+  `pnpm test` (root only, so `packages/mcp`'s 29 tests never ran) and never
+  `pnpm test:browser`. Since ADR-021 records CI as advisory pending branch
+  protection, the last automatic gate before a real `npm publish` was the one
+  that skipped the only lane where storage is real.
+- **`llms.txt` no longer denies the flagship feature exists.** It stated the
+  four AI-first trust primitives were "designed and audited, not yet in this
+  build"; they shipped 2026-07-19 and all four are exported from the package
+  root. Source map and verify commands brought current, `packages/mcp` added,
+  and what is genuinely absent (sync) stated plainly.
+
+### Added
+
+- **`SECURITY.md`** — there was no private vulnerability-disclosure path for a
+  package that holds user data and ships an agent surface. Points at GitHub
+  private advisories rather than an email address. **Danny must enable "Private
+  vulnerability reporting" in repo settings for the link to work.** Scope
+  section names what counts (allowlist bypass on the MCP surface, matcher
+  escapes, a veto that fails to veto) and what is a documented boundary rather
+  than a defect (origin tags are attribution, not authentication; no encryption
+  at rest).
+- **CI proves the API differ can fail before trusting it to pass.**
+  `check-api-report.mjs` shipped a `--selftest` that nothing invoked, while
+  `check-pack-manifest.sh` and `cross-check-publish-surface.sh` both self-test
+  inline on every run. The newest publish gate was the one odd one out.
+
 ## [2026-08-01] — publish preflight: the last unmet ADR-022 precondition, and the oracle bug CI found on an unlucky seed
 
 Preparing to publish. ADR-022 states the required order in one line — *DAN-724 decided → api-report snapshot exists → publish* — and only the first was done. Two blockers closed, and one open question answered in a way that removes a whole ADR from the publish path.

@@ -1,8 +1,50 @@
+---
+title:       colada-db failure log
+kind:        lessons
+status:      active
+updated:     2026-08-01
+owner:       danny
+verified_by: "N/A — narrative"
+---
+
 # LESSONS.md — colada-db
 
 Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
+
+## [2026-08-01] — a mechanism can be built, tested, documented and ADR'd, and still never fire on the default path
+
+**Mistake:** `formatVersion` — the persisted format's only escape hatch — was
+never written to disk by any consumer who didn't call `setManifest`. That is
+the default `hydration: "all"` path, and it is what the README quickstart
+teaches. Publishing would have put databases into the world carrying no version
+marker at all, which is ADR-022 line 1: a user pays, on their own disk, with no
+choice.
+
+**Why it happened:** every individual piece was correct and had evidence behind
+it. ADR-018 decided the stamp. `CDB_FORMAT_VERSION` existed. The boot policy
+was implemented, and `format-version.spec.ts` covered absent / equal / higher
+with real assertions on real durable bytes. **Both boot paths already parsed
+and skipped the index row.** What nothing covered was whether the row was ever
+*written* outside manifest mode — because every test that asserted the stamp
+reached it through `setManifest`, which was also the only thing that set
+`indexDirty`. The tests and the feature shared a precondition, so the tests
+could not see the hole. A code comment even stated the gap as though it were a
+design choice: *"any DB with no manifests (hence no index row), legitimately
+carry no version."*
+
+**Fix:** the row is stamped on the first flush that persists anything
+(`src/persist.ts`), plus four tests in `src/format-version.spec.ts` — including
+a negative control asserting a coordinator that persists nothing still writes
+nothing, so the suite cannot pass by simply always finding a row. Reverted the
+fix and watched 3 of 4 go red before trusting them.
+
+**For future agents:** when a feature has a write side and a read side, test
+them against each other and ask *"what reaches this on the path the README
+teaches?"* — a test that reaches a mechanism through the same API that enables
+it is measuring the mechanism, not its coverage. Read the default path
+explicitly; it is the one no test author is forced to think about.
 
 ## [2026-07-31] — a `webServer` with `reuseExistingServer: true` on a fixed port will happily test a STRANGER'S dev server
 

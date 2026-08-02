@@ -52,7 +52,7 @@
     "hooks:install": "git config core.hooksPath .githooks && echo 'pre-push hook enabled (core.hooksPath=.githooks)'",
     "hooks:uninstall": "git config --unset core.hooksPath || true; echo 'pre-push hook disabled'",
     "play": "vite playground",
-    "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test && pnpm lint && pnpm check:publish-surface && pnpm check:api-report && pnpm check:pack-manifest",
+    "prepublishOnly": "pnpm -r build && pnpm -r typecheck && pnpm -r test && pnpm -r lint && pnpm test:browser && pnpm check:publish-surface && pnpm check:api-report && pnpm check:pack-manifest",
     "lint": "oxlint --deny-warnings . && node scripts/no-unguarded-process-env.mjs",
     "lint:fix": "oxlint --fix --deny-warnings . && node scripts/no-unguarded-process-env.mjs",
     "test": "vitest run",

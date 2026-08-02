@@ -29,6 +29,15 @@
  * `opaque` instead of crashing. Entity records are TRUSTED store data
  * (same JS realm, plain objects); evaluation reads own properties only.
  *
+ * Fields are FLAT own-property names. There is no path traversal: `"a.b"` is
+ * the literal key `"a.b"`, not `a` then `b`, so a filter on `"a.b"` against
+ * `{ a: { b: 2 } }` matches nothing. This is deliberate — an entity may
+ * legitimately own a key containing a dot, and reserving the character would
+ * make that key unfilterable — but it is easy to misread, so it is stated
+ * here, in `M`'s docs, and in `docs/design/matcher-semantics.md`. Nested
+ * access is a normalization concern: give the inner object its own entity
+ * type and filter on the flat field that references it.
+ *
  * Evaluation semantics are normative and documented in
  * `docs/design/matcher-semantics.md` — the future SQL tier must compile
  * to IDENTICAL semantics (with explicit `IS NULL` guards; see the design
@@ -549,6 +558,10 @@ function build(node: unknown): MatcherNode {
  *   M.not(M.in("region", ["test", "staging"])),
  * )
  * ```
+ *
+ * `field` is a FLAT own-property name — no path traversal. `M.eq("a.b", 2)`
+ * looks for the literal key `"a.b"` and will not match `{ a: { b: 2 } }`.
+ * See the module docs for why the dot is not reserved.
  */
 export const M = {
   eq: (field: string, value: MatcherScalar): MatcherNode => build({ op: "eq", field, value }),

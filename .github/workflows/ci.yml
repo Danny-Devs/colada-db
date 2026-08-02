@@ -182,6 +182,16 @@ jobs:
       # This one diffs the surface itself against a committed report, so
       # "did the public surface change?" is answered by a diff rather than by
       # whether a reviewer happened to look.
+      # Prove the differ can FAIL before trusting it to pass — the same
+      # discipline check-pack-manifest.sh and cross-check-publish-surface.sh
+      # already apply inline on every run. This gate was the odd one out: it
+      # shipped a --selftest that nothing invoked, so a green tick meant "the
+      # report matched" OR "the comparison silently degraded", with no way to
+      # tell them apart. Seven positive controls, including a dropped export
+      # and comment-stripping that must not eat a URL inside a string literal.
+      - name: Prove the API differ can fail
+        run: node scripts/check-api-report.mjs --selftest
+
       - name: Assert the public API report
         run: node scripts/check-api-report.mjs
 

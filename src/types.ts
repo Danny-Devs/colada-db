@@ -493,6 +493,17 @@ export interface EntityStore {
  *   Do not read `version` as an ordering across different rows today. It is
  *   only meaningful compared against an EARLIER version of the SAME row.
  *
+ *   The slot is typed `string | number`, matching `EntityEvent.version`, and
+ *   the width is deliberate (pre-publish review 2026-08-01). It was `number`
+ *   here while the event allowed both, even though the sentence above names a
+ *   *server timestamp* as a legitimate source and a server timestamp is
+ *   routinely an ISO string — as are the hybrid logical clocks the causal
+ *   stamp below would most likely use. Since the semantic is still open
+ *   (DAN-736 item 3), narrowing the type would have decided it by accident,
+ *   in the one direction publish makes unfixable: widening a return type
+ *   afterwards breaks every consumer that reads it. Engines that count writes
+ *   keep returning numbers; nothing is asked of them.
+ *
  *   Cost is NOT the blocker on fixing this, contrary to the obvious guess.
  *   Measured against real IndexedDB: per-row versioning via get-then-put is
  *   2.2x, via cursor 2.3x (worse), but a single monotonic counter row read
@@ -526,7 +537,7 @@ export interface StorageEngine {
   open(): Promise<void>;
 
   /** Load every persisted entity for boot hydration. */
-  loadAll(): Promise<Array<{ key: EntityKey; data: unknown; version?: number }>>;
+  loadAll(): Promise<Array<{ key: EntityKey; data: unknown; version?: string | number }>>;
 
   /**
    * Load a specific set of rows (selective hydration — manifest boot,
@@ -534,7 +545,9 @@ export interface StorageEngine {
    * from the result, never errors. Empty input resolves `[]` without I/O.
    * Result order is unspecified.
    */
-  loadMany(keys: EntityKey[]): Promise<Array<{ key: EntityKey; data: unknown; version?: number }>>;
+  loadMany(
+    keys: EntityKey[],
+  ): Promise<Array<{ key: EntityKey; data: unknown; version?: string | number }>>;
 
   /**
    * Apply puts and deletes as one batch (atomic where supported).

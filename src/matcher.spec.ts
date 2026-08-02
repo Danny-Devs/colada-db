@@ -45,6 +45,32 @@ describe("matcher builder (M)", () => {
   });
 });
 
+/**
+ * Fields are flat own-property names — the documented semantic in
+ * `docs/design/matcher-semantics.md` and the `matcher.ts` module docs.
+ * Pinned here because until the pre-publish review 2026-08-01 the ONLY thing
+ * asserting it was prose, and the failure mode is silent: a filter written
+ * with nested intent returns an empty result rather than an error, which on
+ * the agent surface reads as a confident "no matches".
+ */
+describe("matcher fields are flat — no path traversal", () => {
+  it("a dotted field is a literal key, not a path", () => {
+    expect(evaluateMatcher(M.eq("a.b", 2), { a: { b: 2 } })).toBe(false);
+    // ...and it DOES match the literal key, which is why the dot stays legal.
+    expect(evaluateMatcher(M.eq("a.b", 2), { "a.b": 2 })).toBe(true);
+  });
+
+  it("the parser accepts a dotted field rather than refusing it", () => {
+    expect(() => parseMatcher({ op: "eq", field: "a.b", value: 2 })).not.toThrow();
+  });
+
+  it("exists does not traverse either", () => {
+    expect(evaluateMatcher(M.exists("a.b"), { a: { b: 2 } })).toBe(false);
+    expect(evaluateMatcher(M.exists("a.b"), { "a.b": undefined })).toBe(false);
+    expect(evaluateMatcher(M.exists("a.b"), { "a.b": null })).toBe(true);
+  });
+});
+
 describe("evaluateMatcher — strict semantics", () => {
   const entity = {
     id: "1",

@@ -75,12 +75,12 @@ interface StorageEngine {
   loadAll(): Promise<Array<{
     key: EntityKey;
     data: unknown;
-    version?: number;
+    version?: string | number;
   }>>;
   loadMany(keys: EntityKey[]): Promise<Array<{
     key: EntityKey;
     data: unknown;
-    version?: number;
+    version?: string | number;
   }>>;
   writeBatch(puts: Array<{
     key: EntityKey;

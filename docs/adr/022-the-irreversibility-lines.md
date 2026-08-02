@@ -1,6 +1,7 @@
 # ADR-022: The irreversibility lines — what publish makes permanent, and why they get specified out of phase order
 
 **Status:** Accepted
+**Implementation:** in-progress
 **Date:** 2026-07-30
 **Context ticket:** DAN-724 (the live instance), DAN-653 (how it surfaced)
 
@@ -114,9 +115,44 @@ specified **fully and revisably**, never left deliberately vague.
 
 ## Open
 
-- **DAN-724** — decide line 1's `version` question before the IndexedDB format
-  is frozen at publish: implement in `idbEngine`, or state in the contract that
-  absence means "unknown" and must never be read as "older."
+- ~~**DAN-724** — decide line 1's `version` question before the IndexedDB
+  format is frozen at publish: implement in `idbEngine`, or state in the
+  contract that absence means "unknown" and must never be read as "older."~~
+  **[DECIDED 2026-08-01 — second option taken; a residue remains, named below]**
+  The contract states it verbatim in `src/types.ts` ("A consumer MUST treat an
+  absent `version` as UNKNOWN, never as 'older'"), that JSDoc ships in
+  `dist/index.d.mts` so consumers read it in their IDE, and the conformance kit
+  enforces all-or-nothing in **both** directions via its `versioned` capability
+  — a partial counter fails. `idbEngine` deliberately stays unversioned.
+  *What is NOT decided, and is not publish-blocking:* the `version` **semantic**
+  (revision depth vs causal stamp) stays open under DAN-736 item 3, because it
+  cannot be settled until ADR-006's comparator has a signature. Publish freezes
+  the slot's *type*, not its meaning — so the slot was widened to
+  `string | number` to match `EntityEvent.version` before that froze (below).
+
+- **[FOUND 2026-08-01, pre-publish review — line 1, fixed]** `formatVersion`,
+  the persisted format's only escape hatch (ADR-018), was written **only for
+  consumers who called `setManifest`**. It lives in the manifest index row, and
+  that row was materialized solely when the manifest API had been used — so
+  every database created on the default `hydration: "all"` path, which is what
+  the README quickstart teaches, carried no version marker anywhere on disk.
+  The read side was never the gap: both boot paths already parse and skip the
+  index row. Only the write side was conditional. Now stamped on the first
+  flush that persists anything (`src/persist.ts`), pinned by four tests in
+  `src/format-version.spec.ts` that were watched to fail first.
+  This is the exact shape the ADR predicts — a mechanism that exists, is
+  tested, is documented, and does not reach the common case — and it is worth
+  recording that the table above did not catch it. What caught it was reading
+  the write path and the read path against each other.
+
+- **[FOUND 2026-08-01, pre-publish review — line 2, fixed]** `StorageEngine`'s
+  `version` slot was `number` while `EntityEvent.version` was `string | number`,
+  even though the engine JSDoc names a *server timestamp* as a legitimate
+  source and the causal stamp it eventually wants would most likely be a hybrid
+  logical clock — both strings. With the semantic still open (above), the
+  narrower type would have decided it by accident, in the direction publish
+  makes unfixable: widening a return type afterwards breaks every reader.
+  Widened to `string | number`. No code anywhere performed arithmetic on it.
 - ~~**Line 2** has no api-report snapshot yet. Until one exists, "did the public
   surface change?" is answered by review rather than by a diff — which is the
   same class of weakness ADR-021 records for CI. Tracked under Phase 4.~~

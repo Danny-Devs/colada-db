@@ -249,3 +249,95 @@ describe("DAN-654 / ADR-018 — formatVersion boot policy", () => {
     h.dispose();
   });
 });
+
+/**
+ * ADR-018 / ADR-022 line 1 — the format stamp must reach EVERY database.
+ *
+ * Found by the pre-publish review 2026-08-01. `formatVersion` lives in the
+ * manifest index row and nowhere else, and that row used to be written only
+ * when `setManifest`/`removeManifest` had been called. So the default
+ * `hydration: "all"` path — precisely what the README quickstart teaches —
+ * persisted a database with NO version marker anywhere on disk, leaving the
+ * format's only escape hatch absent from the common case.
+ *
+ * The read side was never the gap: both boot paths already parse and skip the
+ * index row. Only the write side was conditional.
+ */
+describe("ADR-018 — the format stamp is unconditional", () => {
+  it("stamps a default-path db that never calls setManifest", async () => {
+    const engine = memoryEngine();
+    const store = createEntityStore();
+    const h = enablePersistence(store, { engine, writeDebounce: 0 });
+    await h.ready;
+
+    // Exactly the README quickstart: set, flush. No manifest API touched.
+    store.set("contact", "1", { id: "1", name: "Ada" });
+    await h.flush();
+
+    const row = engine.snapshot().get(INDEX_KEY);
+    expect(row, "default-path db must carry the ADR-018 format stamp").toBeDefined();
+    const indexRow = row!.data as { v: number; formatVersion?: number; scopes: string[] };
+    expect(indexRow.formatVersion).toBe(CDB_FORMAT_VERSION);
+    // Honest empty: this coordinator has no manifests, which is not the same
+    // as having none recorded.
+    expect(indexRow.scopes).toEqual([]);
+    h.dispose();
+  });
+
+  it("writes no index row when the coordinator persists nothing", async () => {
+    const engine = memoryEngine();
+    const store = createEntityStore();
+    const h = enablePersistence(store, { engine, writeDebounce: 0 });
+    await h.ready;
+    await h.flush(); // nothing dirty
+
+    expect(engine.snapshot().size, "an untouched db stays empty").toBe(0);
+    h.dispose();
+  });
+
+  it("stamps an unstamped legacy db on its next write, and only once", async () => {
+    const engine = memoryEngine();
+    // A database written by a build that stamped only manifest users.
+    await engine.writeBatch([{ key: "contact:1" as EntityKey, value: { id: "1", name: "A" } }], []);
+    expect(engine.snapshot().has(INDEX_KEY)).toBe(false);
+
+    const store = createEntityStore();
+    const h = enablePersistence(store, { engine, writeDebounce: 0 });
+    await h.ready;
+    expect(store.has("contact", "1")).toBe(true);
+    // Boot alone must not write — an app that only reads stays read-only.
+    expect(engine.snapshot().has(INDEX_KEY)).toBe(false);
+
+    store.set("contact", "2", { id: "2", name: "B" });
+    await h.flush();
+    const stamped = engine.snapshot().get(INDEX_KEY)!;
+    expect((stamped.data as { formatVersion?: number }).formatVersion).toBe(CDB_FORMAT_VERSION);
+
+    // Second flush must not rewrite the row — version 1 means written once.
+    store.set("contact", "3", { id: "3", name: "C" });
+    await h.flush();
+    expect(engine.snapshot().get(INDEX_KEY)!.version).toBe(stamped.version);
+    h.dispose();
+  });
+
+  it("a stamped db is not rewritten on a later session's first write", async () => {
+    const engine = memoryEngine();
+    const s1 = createEntityStore();
+    const h1 = enablePersistence(s1, { engine, writeDebounce: 0 });
+    await h1.ready;
+    s1.set("contact", "1", { id: "1", name: "A" });
+    await h1.flush();
+    const firstWrite = engine.snapshot().get(INDEX_KEY)!.version;
+    h1.dispose();
+    await tick();
+
+    const s2 = createEntityStore();
+    const h2 = enablePersistence(s2, { engine, writeDebounce: 0 });
+    await h2.ready; // boot sees the row → indexPersisted
+    s2.set("contact", "2", { id: "2", name: "B" });
+    await h2.flush();
+
+    expect(engine.snapshot().get(INDEX_KEY)!.version).toBe(firstWrite);
+    h2.dispose();
+  });
+});

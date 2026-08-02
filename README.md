@@ -24,12 +24,60 @@ await handle.ready; // hydrated from IndexedDB before your first read
 store.set("contact", "1", { id: "1", name: "Ada", email: "ada@example.com" });
 
 const contact = store.get("contact", "1"); // a reactive ref — the read is synchronous
-console.log(contact.value.name); // "Ada"
+console.log(contact.value?.name); // "Ada" — undefined until the entity exists
 
 await handle.flush(); // the write is now durable
 ```
 
-Reads never await. `store.get` returns a reactive ref backed by the in-memory projection, while persistence happens write-behind underneath — reload the page and `handle.ready` brings it all back. That the data actually survives process death is not a claim we make on paper: it is asserted against real IndexedDB and real OPFS SQLite in a real browser, in `tests/browser/`.
+Reads never await. `store.get` returns a reactive ref backed by the in-memory projection, while persistence happens write-behind underneath — reload the page and `handle.ready` brings it all back. That the data actually survives is not a claim we make on paper: it is asserted against real IndexedDB and real OPFS SQLite in a real Chromium, across a genuine page reload that destroys the heap and terminates the SQLite worker, in `tests/browser/`.
+
+### Typed entities
+
+Reads are `Record<string, unknown>` until you say what an entity is. Declare it once and every `get`/`set`/`getByType` for that type is typed — including the ref you just read:
+
+```ts
+declare module "colada-db" {
+  interface EntityRegistry {
+    contact: { id: string; name: string; email: string };
+  }
+}
+
+const name: string | undefined = store.get("contact", "1").value?.name;
+```
+
+### Normalizing a payload
+
+The store holds a **graph**, not a keyed blob cache. Hand it a nested server response and every entity in it lands once, addressable on its own — update the contact in one place and every view holding it sees the change:
+
+```ts
+import { denormalize, normalize, writeEntitiesToStore } from "colada-db";
+
+const payload = {
+  __typename: "post",
+  id: "p1",
+  title: "Hello",
+  author: { __typename: "contact", id: "1", name: "Ada", email: "ada@example.com" },
+};
+
+const { normalized, entities } = normalize(payload, {}, "id");
+writeEntitiesToStore(entities, {}, store);
+
+store.get("contact", "1").value?.name; // "Ada" — extracted, addressable on its own
+denormalize(normalized, store); // the nested shape back, resolved from the graph
+```
+
+An entity is identified by its **type and id**. `__typename` (the GraphQL convention) is the only auto-detection colada-db performs — deliberately, because auto-detecting on a bare `id` would collide unrelated objects that happen to share one. For APIs without `__typename`, name the types yourself with `defineEntity`:
+
+```ts
+import { defineEntity } from "colada-db";
+
+const entityDefs = {
+  contact: defineEntity({ getId: (e) => (typeof e.email === "string" ? String(e.id) : null) }),
+  post: defineEntity({ getId: (e) => (typeof e.title === "string" ? String(e.id) : null) }),
+};
+```
+
+Each definition must be able to *recognize* its own records: definitions are tried in order and the first match wins, so several types sharing a plain `idField: "id"` would all claim the same record. `getId` returning `null` is how a definition declines.
 
 ## The design
 

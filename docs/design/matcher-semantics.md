@@ -19,6 +19,25 @@ its value is `undefined`. Prototype-chain properties are invisible.
 - Only `exists` can see absence. `null` is a **present** value: it
   satisfies `exists: true`, and `eq null` matches it.
 
+## Fields are flat (no path traversal)
+
+A `field` is a single own-property name, matched literally. There is **no**
+dot-path traversal: `{ op: "eq", field: "a.b", value: 2 }` looks for a
+property whose key is the four-character string `a.b`, and does **not**
+match `{ a: { b: 2 } }`.
+
+The dot is not a reserved character, and deliberately so — an entity may own
+a key that contains one, and reserving it would make that key unfilterable.
+The parser therefore accepts `"a.b"` rather than refusing it. The cost is
+that a filter written with nested intent returns an empty result instead of
+an error, so it is stated here, in the `matcher.ts` module docs, and on `M`.
+
+Nested access is a **normalization** concern, not a matcher one: give the
+inner object its own entity type and filter on the flat field that
+references it. This is also what keeps the SQL-parity contract below
+tractable — a path syntax would require JSON-extraction semantics to be
+identical across the in-memory and SQL tiers.
+
 ## Operator table
 
 | Op | AST shape | Matches when | Notes |

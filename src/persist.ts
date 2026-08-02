@@ -43,9 +43,16 @@ const INDEX_KEY = `${MANIFEST_PREFIX}__index__` as EntityKey;
  * stamped into the manifest INDEX row (its natural home — the one row the
  * coordinator owns and reads on every boot; ADR-018).
  *
+ * Every database written by this build carries the stamp: the index row is
+ * materialized on the first flush that persists anything, whether or not the
+ * consumer ever calls `setManifest`. Before 2026-08-01 it was written only by
+ * manifest users, which left the default `hydration: "all"` path — the common
+ * case — with no version marker on disk at all.
+ *
  * Boot policy (ADR-018), the ONLY machinery that exists by design:
- * - **absent** → treat as v1 and proceed. Pre-publish DBs, and any DB with no
- *   manifests (hence no index row), legitimately carry no version.
+ * - **absent** → treat as v1 and proceed. This now means a database written
+ *   before the stamp became unconditional, which is a sound v1 discriminator
+ *   precisely because no such database can have been written by a later build.
  * - **equal** → normal boot.
  * - **higher than this build knows** → `console.warn` once and proceed anyway
  *   (forward-tolerant; never crash a user's app on a version bump).
@@ -310,6 +317,10 @@ export function enablePersistence(
   const removedPreBoot = new Set<string>(); // removeManifest before boot seeding
   let indexDirty = false;
   let indexSeeded = false;
+  // Whether the manifest index row — the ADR-018 format stamp's only home —
+  // is known to exist durably: read at boot, or written by an earlier flush.
+  // While false, the next flush that writes anything stamps it (see flush).
+  let indexPersisted = false;
   let gcTimer: ReturnType<typeof setTimeout> | null = null;
   let formatVersionWarned = false; // ADR-018: warn-on-newer fires at most once
 
@@ -470,7 +481,21 @@ export function enablePersistence(
     // Materialize the manifest index row NOW, from the live mirror —
     // lazy so pre-boot writes can never snapshot a half-seeded index
     // (review B1).
-    if (indexDirty) {
+    //
+    // The second clause is the ADR-018 format stamp reaching EVERY database,
+    // not only manifest users (review 2026-08-01). `formatVersion` lives in
+    // this row and nowhere else, and this row used to be written only when
+    // `setManifest`/`removeManifest` had been called — so a consumer on the
+    // default `hydration: "all"` path (what the README quickstart teaches)
+    // persisted a database carrying NO version marker at all. The only
+    // escape hatch the format has was absent from the common case, which is
+    // exactly the ADR-022 line-1 failure: if we are wrong, the user pays, on
+    // their own disk, with no choice. Both boot paths already read and skip
+    // this row, so stamping it unconditionally costs one row and changes no
+    // hydration behavior. An empty `scopes: []` is the honest value — this
+    // coordinator has no manifests, which is different from having none
+    // recorded.
+    if (indexDirty || (!indexPersisted && (dirtySaves.size > 0 || dirtyDeletes.size > 0))) {
       const row: ManifestIndexRow = {
         v: 1,
         formatVersion: CDB_FORMAT_VERSION,
@@ -478,6 +503,9 @@ export function enablePersistence(
       };
       dirtySaves.set(INDEX_KEY, row);
       indexDirty = false;
+      // A rejected writeBatch disables the coordinator permanently, so there
+      // is no retry path this optimistic flip could strand.
+      indexPersisted = true;
     }
 
     flushing = true;
@@ -742,7 +770,10 @@ export function enablePersistence(
           const indexRows = await engine.loadMany([INDEX_KEY]);
           if (disposed) return;
           const indexRow = indexRows.length > 0 ? (indexRows[0].data as ManifestIndexRow) : null;
-          if (indexRow) checkFormatVersion(indexRow);
+          if (indexRow) {
+            checkFormatVersion(indexRow);
+            indexPersisted = true; // already stamped; don't rewrite it
+          }
           const persisted = indexRow ? indexRow.scopes : [];
           const bootScopes = persisted.filter((s) => !removedPreBoot.has(s));
           seedIndex(persisted);
@@ -780,6 +811,7 @@ export function enablePersistence(
             if (row.key === INDEX_KEY) {
               const indexRow = row.data as ManifestIndexRow;
               checkFormatVersion(indexRow);
+              indexPersisted = true; // already stamped; don't rewrite it
               seedIndex(indexRow.scopes);
               continue;
             }
