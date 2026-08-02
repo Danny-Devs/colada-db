@@ -10,6 +10,44 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **The sync coordinator — `enableSync(store, opts)` — Stage 3 goes from a frozen contract to a
+  working local-first sync loop.** `src/coordinator.ts` implements every numbered behavior in
+  ADR-006 rev d's "Coordinator semantics": the outbox tap (`store.subscribe()` filtered on
+  `origin === "local-mutation"`, an accept-list), push/pull with confirmation gated solely by the
+  pull channel's `confirmedMutations` (never a push ack alone), version-aware apply with the
+  four-valued comparator, echo suppression, the ADR-004 boundary, `local: true` exclusion,
+  exponential-backoff-with-jitter retry (D9), independent per-subscription reset jitter (D10),
+  schema-mismatch suspension (D12), and same-device sibling-outbox recovery (§1c/D4). `src/
+  coordinator-conformance.ts` + `src/coordinator-conformance.spec.ts` add 35 tests proving all 14
+  named obligations in `SYNC_CONTRACT_COVERAGE.coordinator` plus the ADR's remaining numbered
+  clauses — the highest-risk ones **watched to fail**: the exact mechanism was temporarily broken
+  in `coordinator.ts`, the corresponding test confirmed red, then reverted (recorded on DAN-776,
+  not encoded as permanent mutants — there is exactly one `enableSync()` to mutate against, unlike
+  the many swappable adapters `sync-conformance.ts` protects).
+
+  **Not exported from `index.ts`** — same ADR-022 lines 1-2 precedent as `sync-types.ts` /
+  `sync-conformance.ts`. Suite goes 522 → 557 (plus `packages/mcp`'s 29, unchanged).
+
+  **Two implementation gaps found writing this, both resolved in ADR-006 itself** ("Implementation
+  note, part 2"): §1's "`reject` triggers the existing rollback machinery" describes a mechanism
+  `transactions.ts` cannot offer post-commit (`rollback()` is only reachable before `commit()`
+  splices the transaction out) — the fix reads `EntityEvent.previousData`, already captured for
+  free, and reverts under a new `origin: "undo"` write channel instead. And `transform`'s "rekey
+  entity... one move event" has no single-event primitive to build from (`EntityStore` has no
+  rename), so it composes as `set(newId)` + `remove(oldId)`.
+
+  **A third gap — this one an actual bug, not a spec gap — found by an independent fresh-context
+  review of the diff before landing:** the transform branch applied the server's corrected entity
+  immediately (per D2) but never replayed a second, still-unconfirmed writer to the same key on
+  top of it — the exact hazard the reject-path fix above was written to prevent, just left unfixed
+  on the sibling branch. Also fixed from the same review: a thrown `pull()` was an unhandled
+  promise rejection that permanently killed that subscription (now retries with the same
+  backoff+jitter shape as push); a rejected *adopted* (sibling-recovered) outbox entry always
+  reverted to non-existence regardless of what it actually overwrote, because
+  `StrandedOutboxEntry` never carried `previousData`; and a schema-suspended outbox had no way to
+  resume (`resumeAfterSchemaMigration()` added — D12 says a mismatch suspends the outbox but never
+  says how suspension lifts, and the coordinator cannot detect an app-level migration on its own).
+
 - **Pagination is tested. It shipped in `0.1.0` untested, and nobody could tell.**
   `cursorPagination`, `offsetPagination` and `relayPagination` have been exported
   from `index.ts` since extraction — with **no test anywhere in this repository.**

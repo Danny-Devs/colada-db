@@ -890,3 +890,34 @@ be true. The correction lives in ADR-024. And the rule:
 requires — **verify the fact, not the inference.** Ask "is this still true?"
 before "does this follow?" A registry, a deployed artifact, or a raw source file
 is the system of record; a document that summarizes one is not.
+
+## [2026-08-02] — a hazard fixed on one verdict branch was left live on its sibling
+
+**Mistake:** building the sync coordinator (DAN-776), `handleVerdict`'s `reject` branch reverts a
+rejected write and then replays every OTHER still-outstanding outbox entry for the same key on top
+— because reverting first and stopping there would silently erase a second, still-unconfirmed
+writer's edit to that entity. The `transform` branch applies the server's corrected entity
+immediately (ADR-006 rev d / D2 requires this) but, as first written, never replayed the same
+siblings on top of it — an independent fresh-context review of the diff caught it before landing;
+self-review had not.
+
+**Why it happened:** `reject` and `transform` are both "an authoritative write just landed on this
+key from outside the local writer" — the exact same hazard, arrived at from two different verdict
+types. The fix was written once, for the branch that prompted it (reject), and the structurally
+identical branch sitting right next to it in the same `switch`-shaped function was never re-asked
+"does this need the same fix?" A test suite built alongside the code has the same blind spot the
+code does — 31 tests passed with the bug present, because none of them put a second writer in
+flight during a `transform`, the same way the first-written `reject` test did.
+
+**Fix:** the revert/replay logic was extracted into one shared `replaySiblings()` helper, called
+from both branches, so the fix can no longer exist in only one of them by construction. Two new
+watched-to-fail tests (`coordinator-conformance.spec.ts`, "found by independent review, DAN-776")
+pin each branch independently.
+
+**For future agents:** when two code paths handle structurally symmetric cases of the same
+underlying event (two verdict types, two directions of a diff, two branches of an origin check),
+a hazard found and fixed on one is a standing question on every sibling, not a closed matter —
+literally re-ask "does this apply to the other branch(es) too?" the moment a fix like this lands,
+before moving on. And self-review is not a substitute for a second, differently-contexted reader:
+the reviewer that caught this had no attachment to the original design reasoning and was reading
+the diff cold against the spec, not against the author's own mental model of what the code does.
