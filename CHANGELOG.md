@@ -56,6 +56,77 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Changed
 
+- **ADR-006 rev d — the sync-adapter contract now says one thing per question.**
+  Writing the Allium specification of the contract against rev c exposed 20
+  unresolved points, four of them outright contradictions where two sections of
+  the same document specified different behaviour (DAN-736). **Rev d resolves all
+  twenty**, and the contract now has no open questions. The contract is frozen and
+  the coordinator is unbuilt, which makes this the cheapest moment these will ever
+  have — ADR-022 line 5 means wire shapes stop being ours the day a real backend
+  speaks them.
+
+  Every change is additive except one deletion. **A second mutation-confirmation
+  path is gone**: `§1b` offered confirmation via "a pulled checkpoint ≥ the ack's
+  serverVersion", which had no field on `PullResult` to travel in, and which
+  presumed versions were *totally* ordered — the exact property constraint C2
+  exists to refuse, so a vector clock or hybrid logical clock stays
+  representable. `confirmedMutations` is now the sole confirmation channel, and
+  it costs a backend nothing extra because per-client seq tracking was already
+  mandatory.
+
+  The additions: `compareVersions` becomes a real, optional, **four**-valued
+  adapter method, because three values cannot say *concurrent* — the same
+  decision as 0.1.0's pre-publish widening of the version slot to
+  `string | number`, since an HLC that can only report a total order is a slow
+  integer. `pull()` and both `PullResult` variants gain an optional
+  `subscription` name, which finally defines the partition unit the per-
+  subscription checksums and resets had been referring to; the name is opaque
+  and core never parses it, because an opaque name is the most a partition can be
+  without letting a server-evaluated shape model reach the coordinator and
+  foreclose end-to-end encryption permanently. `transform` splits into an
+  immediate id remap and a deferred overlay drop, which were never one operation.
+  Sibling-outbox recovery is defined as relay rather than authorship, with the
+  commit-time obligation that makes it survive a public-key `clientId`.
+
+  Also settled: `limit` is a hint, retry backoff has **no attempt ceiling and no
+  dead-letter queue** (dropping a user's write silently is worse than staying
+  visibly stuck — correct for a job queue, wrong for a local-first database),
+  checksum verification is presence-driven rather than flag-driven, a
+  `schemaVersion` mismatch suspends the outbox rather than draining it, a
+  server-directed reset never invalidates in-flight seqs, and tombstone retention
+  becomes a checkable relation to the oldest honoured cursor.
+
+  The two naming drifts resolved in favour of the shipped code, not the document:
+  the origin stamp is `sync-pull` (not `remote`) and the device-local flag is
+  `local?: boolean` (not `sync: false`). These read like coin flips until you
+  notice one side of each is on npm.
+
+  **The contract now has no open questions, and the last two are why that
+  matters.** A first draft of rev d left named-mutator rebase and priority-tiered
+  hydration open, justified as "additive later, not one-way doors." That is true
+  of the *fields* and false of the *contract*: adding a second way to express a
+  write to a protocol other people's servers already speak forces every adapter
+  thereafter to handle both — a permanent wart bought with a deferral, which is
+  the exact calcification freezing this contract early was meant to prevent.
+
+  `LocalChange` gains an optional `intent: { name, args }` while `data` stays
+  required. Intent is strictly more powerful — a server replaying a named mutator
+  against post-apply state rebases properly rather than judging a patch computed
+  against stale state — but requiring it would require the server to run client
+  code, and an existing REST API cannot execute a function from your bundle. A
+  contract that requires shared code is not backend-neutral, and that is this
+  package's whole identity. So intent is an adapter-level capability, exactly as
+  `transform` is.
+
+  Priority-tiered hydration needed **no wire field at all**: priority is a
+  property of a subscription, and initial pulls are issued in priority order
+  without being awaited. Ordering the starts is what puts gates on a phone screen
+  before history backfills; awaiting would let one slow partition stall every
+  partition behind it.
+
+  Each resolution now carries a **falsification test** rather than a hedge — the
+  thing that makes a decision complete without pretending it is certain.
+
 - **AGENTS.md no longer describes the pre-publish world.** Three claims went
   stale the moment 0.1.0 shipped, in the first file every agent reads: CI was
   described as ADVISORY with a 403 receipt (it is now blocking, six required
