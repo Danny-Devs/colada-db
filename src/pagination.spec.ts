@@ -325,10 +325,34 @@ describe("offsetPagination", () => {
     ).toHaveLength(1);
   });
 
+  it("derives placement from getOffset alone — pageSize is inert", () => {
+    // Pins the behaviour the type now admits to. Through 0.1.0 `pageSize` was
+    // REQUIRED and documented as controlling placement, while the
+    // implementation destructured it as `_pageSize` and never read it: a
+    // mandatory option that did nothing, promising behaviour that did not
+    // exist. Caught in review before it was frozen into the public surface.
+    //
+    // Two merges identical but for `pageSize` must produce identical output.
+    // If someone later implements the documented behaviour this test fails —
+    // which is correct, because that would be a behaviour change to a
+    // published function and must never happen silently.
+    const base = { getOffset: (l: any) => l.offset as number, itemsField: "items" };
+    const existing = { id: "1", items: [{ id: "a" }, { id: "b" }], offset: 0 };
+    const incoming = { id: "1", items: [{ id: "c" }], offset: 2 };
+
+    const withPageSize = offsetPagination({ ...base, pageSize: 2 })(existing, incoming);
+    const withAbsurd = offsetPagination({ ...base, pageSize: 9999 })(existing, incoming);
+    const withNone = offsetPagination(base)(existing, incoming);
+
+    expect(withPageSize).toEqual(withNone);
+    expect(withAbsurd).toEqual(withNone);
+    // And the placement that DOES apply is the offset's.
+    expect((withNone.items as any[]).map((i) => i.id)).toEqual(["a", "b", "c"]);
+  });
+
   it("defaults to 'items' field", () => {
     const merge = offsetPagination({
       getOffset: (l) => l.offset as number,
-      pageSize: 2,
     });
 
     const existing = { id: "1", items: [1, 2], offset: 0 };

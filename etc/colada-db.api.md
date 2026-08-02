@@ -394,7 +394,7 @@ interface CursorPaginationOptions<T extends EntityRecord = EntityRecord> {
 declare function cursorPagination<T extends EntityRecord = EntityRecord>(options: CursorPaginationOptions<T>): (existing: T, incoming: T) => T;
 interface OffsetPaginationOptions<T extends EntityRecord = EntityRecord> {
   getOffset: (entity: T) => number;
-  pageSize: number;
+  pageSize?: number;
   itemsField?: string;
   dedupeKey?: string;
 }
