@@ -117,9 +117,11 @@ interface SyncAdapter {
 
 `TransactionSettledEvent` carries `{ transactionId, outcome }` and **nothing else** — it never says what the mutations were. A coordinator built on `onSettled` alone produces an outbox of empty entries. *`src/transactions.ts:112-115`*
 
-**The tap is `store.subscribe()`, and it is better than what this ADR imagined.** `EntityEvent` already carries `origin`, `transactionId` *and* `version`, so filtering on `origin === "local-mutation"` yields the outbox feed, the transaction grouping §1 needs for atomic server apply, and the version for `baseVersion` — from one subscription. *`src/types.ts:161-220`*
+**The tap is `store.subscribe()`.** `EntityEvent` carries `origin` and `transactionId`, so filtering on `origin === "local-mutation"` yields the outbox feed and the transaction grouping §1 needs for atomic server apply, from one subscription. *`src/types.ts:161-220`*
 
-**And it makes §2 unfalsifiable rather than merely required.** Echo suppression stops being something the coordinator must remember to implement: remote changes are applied under `sync-pull`, so they simply never match the filter. A bug that re-enqueues an echo becomes unwriteable instead of unlikely.
+**`baseVersion` does NOT come from that event, and assuming it does is the trap here.** `EntityEvent.version` exists but is optional and **the in-memory store never populates it** — its own doc comment says so, and `src/store.ts` contains no `version:` assignment. On a local write the field is always `undefined`. The coordinator must read the entity's last-known version from the store instead — the value a previous `sync-pull` apply stamped — and treat its absence as "no baseVersion", never as version zero.
+
+**Echo suppression must be an explicit accept-list, not a deny-list.** Because `origin` is optional, `origin !== "sync-pull"` would sweep in every unstamped write, while `origin === "local-mutation"` admits only what the outbox should carry. An earlier draft of this note claimed the filter made echo suppression "unfalsifiable"; that overstated it. The filter makes the correct behaviour *easy and the incorrect one visible* — it does not make the bug unwriteable, and §2 still owes a test.
 
 ### Coordinator semantics (`enableSync(store, { adapter, ... })`)
 

@@ -287,6 +287,42 @@ describe("offsetPagination", () => {
     // Should have 3 unique items
     expect(result.items.filter((i: any) => i.id === "2")).toHaveLength(1);
     expect(result.items.find((i: any) => i.id === "2")!.name).toBe("Bob Updated");
+
+    // ⚠️ The two assertions above pass WITH THE DEDUP PASS REMOVED, and this
+    // comment is here so nobody mistakes them for coverage of it. At these
+    // offsets the positional overlay already collapses the duplicate: incoming
+    // offset 1 writes "2" into index 1, which is where the existing "2" sat.
+    // The test proves the overlay, not the dedup.
+    //
+    // Below is the case that genuinely requires dedup — the same id arriving at
+    // a DIFFERENT index, which the overlay cannot collapse because it writes
+    // somewhere else. Verified by mutation: removing `mergedItems.splice(i, 1)`
+    // from pagination.ts turns this red and leaves the two above green.
+    const shifted = merge(
+      {
+        listId: "contacts",
+        items: [
+          { id: "a", name: "A" },
+          { id: "b", name: "B" },
+          { id: "c", name: "C" },
+        ],
+        offset: 0,
+        total: 5,
+      },
+      {
+        listId: "contacts",
+        items: [
+          { id: "c", name: "C again" },
+          { id: "d", name: "D" },
+        ],
+        offset: 3,
+        total: 5,
+      },
+    );
+    expect(
+      shifted.items.filter((i: any) => i.id === "c"),
+      "id 'c' survived at two indices — the dedup pass is not running",
+    ).toHaveLength(1);
   });
 
   it("defaults to 'items' field", () => {

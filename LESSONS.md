@@ -848,10 +848,14 @@ on publish)."*
 
 That is false, and it was falsifiable in one command the whole time.
 `pinia-colada-plugin-normalizer@0.3.0` is published on npm — releases back to
-`0.1.8`, 294 downloads in the last month — and its shipped bundle contains
-`enablePersistence`, `idbEngine`, `pcn_entities` and `__pcn_ref`. Real databases
-exist in the wild under the old names. Chip 3 as planned would have started,
-found nothing under the new names, and presented an empty database with no error.
+`0.1.8` — and its shipped bundle contains `enablePersistence`, `idbEngine`,
+`pcn_entities` and `__pcn_ref`. So the CAPABILITY to create databases under the
+old names shipped to real users; whether any user enabled persistence is
+unknowable from outside, and 294 downloads in the last month bounds the
+population without establishing it. That asymmetry is the point: the premise was
+"never shipped persisted data", and shipping the capability is enough to falsify
+it. Chip 3 as planned would start, find nothing under the new names, and present
+an empty database with no error.
 
 **Why it happened:** the parenthetical is the whole error. *"The plugin-swap is
 chip 3, still gated on publish"* is a true statement about **the plugin
@@ -871,8 +875,11 @@ as more rigorous than an ADR that had simply guessed — it showed its work.
 
 **Fix:** ADR-024 amends ADR-018 (naming decision preserved, migration obligation
 added, chip 3 becomes a major version that must either read the legacy stores
-forward or refuse loudly — never start silently empty). ADR-018 carries a
-reciprocal warning in its header so it cannot be read alone. And the rule:
+forward or refuse loudly — never start silently empty). ADR-018 gains one
+line of reciprocal metadata — an `Amended by:` pointer, so a lint can catch a
+one-directional supersession — and nothing else; its reasoning is untouched,
+because an accepted ADR records what was decided and why, not what turned out to
+be true. The correction lives in ADR-024. And the rule:
 
 > Before any ADR asserts what a package has or has not shipped, run
 > `npm view <pkg> versions`, unpack the tarball, and paste the output into the

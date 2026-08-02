@@ -3,13 +3,7 @@
 **Status:** Accepted
 **Implementation:** shipped
 **Date:** 2026-07-23
-**Amended by:** [ADR-024](024-the-plugin-did-ship-persisted-data.md) (2026-08-02)
-
-> ⚠️ **Premise 2 below is FALSE and the "no migration needed" conclusion does not hold.**
-> `pinia-colada-plugin-normalizer@0.3.0` is published on npm and its shipped bundle
-> contains `enablePersistence`, `idbEngine`, `pcn_entities` and `__pcn_ref` — so real
-> databases DO exist in the wild under the old names. **The naming decision below
-> stands unchanged; the migration obligation is in ADR-024.** Read both or neither.
+**Amended by:** [ADR-024](024-the-plugin-did-ship-persisted-data.md) — premise 2 is false; the naming decision stands, a migration obligation is added
 
 ## Context
 
