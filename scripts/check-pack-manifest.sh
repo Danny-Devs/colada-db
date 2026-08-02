@@ -74,7 +74,16 @@ echo "✔ manifest comparison self-tested (it can fail)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-( cd "$root" && pnpm pack --pack-destination "$tmp" ) || fail "pnpm pack failed"
+# `npm publish --dry-run` exports npm_config_dry_run=true into the environment
+# of every lifecycle script it runs, INCLUDING this one via prepublishOnly. The
+# nested `pnpm pack` below inherits it, prints the file list it would have
+# produced, and writes no tarball — so this gate failed with "found 0" on the
+# one command you would use to rehearse a publish. The rehearsal being the
+# thing that breaks is the worst possible place for it. Scrub the inherited
+# config so the pack below is always a real pack; the outer publish is
+# unaffected because npm re-reads its own flags, not this variable.
+( cd "$root" && env -u npm_config_dry_run -u NPM_CONFIG_DRY_RUN pnpm pack --pack-destination "$tmp" ) ||
+  fail "pnpm pack failed"
 
 # Fail closed on zero or multiple tarballs rather than letting a glob quietly
 # pick one — `tar -tzf a.tgz b.tgz` would silently read only the first.

@@ -90,6 +90,16 @@ than this file's older `[feat]`/`[fix]` tags.
   is a bug or a misconfiguration. The feature form asks whether the proposal
   crosses an ADR-022 irreversibility line. `.editorconfig` and `.nvmrc` too.
 
+### Fixed (publish tooling)
+
+- **`npm publish --dry-run` failed on this repo, and the publish did not.** npm
+  exports `npm_config_dry_run=true` into every lifecycle script it runs, so the
+  nested `pnpm pack` inside `check-pack-manifest.sh` printed a file list and
+  wrote no tarball — the gate then counted zero and failed. The rehearsal you
+  run *because* the real thing is irreversible was the one command that broke.
+  Sixth instance of this repo's recurring family, and the first in the safe
+  direction (see `LESSONS.md`).
+
 ### Removed
 
 - **`"private": true`.** The publish block is lifted — `colada-db` is now

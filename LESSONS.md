@@ -2,7 +2,7 @@
 title:       colada-db failure log
 kind:        lessons
 status:      active
-updated:     2026-08-01
+updated:     2026-08-02
 owner:       danny
 verified_by: "N/A — narrative"
 ---
@@ -12,6 +12,37 @@ verified_by: "N/A — narrative"
 Append-only failure log. Every recurring mistake gets encoded so the next
 agent never makes it again. Strongest-encoding rule: lint > test > skill >
 LESSONS entry (the entry then explains *why* the stronger encoding exists).
+
+## [2026-08-02] — the same trap, mirrored: a gate that reported FAILURE on a question it never evaluated
+
+**Mistake:** `npm publish --dry-run` — the rehearsal you run *because* the real
+thing is irreversible — failed on this repo with
+`expected exactly 1 tarball in /tmp/…, found 0`. The publish itself was fine.
+
+**Why it happened:** npm exports `npm_config_dry_run=true` into the environment
+of every lifecycle script it runs, including `prepublishOnly`. That reaches
+`check-pack-manifest.sh`, whose nested `pnpm pack` inherits it, prints the file
+list it *would* have produced, and writes nothing. The script then counted zero
+tarballs and failed — correctly reporting what it saw, about a question it was
+never actually asked.
+
+Note this repo has now hit this family **six** times, and this is the first in
+the safe direction. The other five reported success on an unevaluated question;
+this one reported failure. The mirror is worth naming, because a false red on
+the publish rehearsal has its own cost: the natural response is to skip the
+rehearsal, which is exactly the wrong lesson to learn right before an
+irreversible act.
+
+**Fix:** `env -u npm_config_dry_run -u NPM_CONFIG_DRY_RUN pnpm pack …` in
+`scripts/check-pack-manifest.sh`, so the nested pack is always a real pack.
+Verified both ways: the script now passes with the variable set and without it,
+and `npm publish --dry-run` completes.
+
+**For future agents:** a nested package-manager invocation inherits the outer
+one's `npm_config_*` environment, and those flags change behavior silently. If
+a script shells out to `npm`/`pnpm` inside a lifecycle hook, scrub the config
+it must not inherit — and test the script under the environment the hook
+actually provides, not the one your shell has.
 
 ## [2026-08-01] — a mechanism can be built, tested, documented and ADR'd, and still never fire on the default path
 
