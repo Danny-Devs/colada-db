@@ -77,6 +77,27 @@ than this file's older `[feat]`/`[fix]` tags.
   `check-pack-manifest.sh` and `cross-check-publish-surface.sh` both self-test
   inline on every run. The newest publish gate was the one odd one out.
 
+- **The open-source furniture a stranger expects.** Every doc in this repo was
+  written for maintainers and agents; a first-time visitor had a README and
+  nothing else. Added `CONTRIBUTING.md` (verify commands, reading order, the
+  append-only ADR rule, when to regenerate the api-report and the pack
+  manifest), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), and GitHub issue
+  and PR templates. The templates are shaped around this codebase rather than
+  the defaults: the bug form asks **which engine** and **whether
+  `engine.persistent` was true**, because `sqliteEngine` silently falls back to
+  an in-memory database when OPFS is unavailable and "my data disappeared" is
+  the expected result in that state — that one answer decides whether a report
+  is a bug or a misconfiguration. The feature form asks whether the proposal
+  crosses an ADR-022 irreversibility line. `.editorconfig` and `.nvmrc` too.
+
+### Removed
+
+- **`"private": true`.** The publish block is lifted — `colada-db` is now
+  publishable. Nothing is on the registry until `npm publish` is run by hand.
+  README's status block now describes a 0.x first release rather than an
+  unpublished extraction, and carries npm/CI/license badges. This is ADR-022
+  lines 3 and 6 going live.
+
 ## [2026-08-01] — publish preflight: the last unmet ADR-022 precondition, and the oracle bug CI found on an unlucky seed
 
 Preparing to publish. ADR-022 states the required order in one line — *DAN-724 decided → api-report snapshot exists → publish* — and only the first was done. Two blockers closed, and one open question answered in a way that removes a whole ADR from the publish path.

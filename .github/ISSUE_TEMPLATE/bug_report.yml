@@ -1,0 +1,89 @@
+name: Bug report
+description: Something behaves differently from what the docs or ADRs say
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security issues do not belong here.** Please use
+        [private vulnerability reporting](https://github.com/Danny-Devs/colada-db/security/advisories/new)
+        instead — see `SECURITY.md`.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest code that shows it. A link to a runnable repo or a
+        StackBlitz is ideal; a self-contained snippet is fine.
+      render: ts
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which storage engine
+      description: >
+        This matters more than it looks. The engines diverge deliberately in
+        places — serialization of Dates, the per-row `version` slot — and
+        several documented behaviors differ between them.
+      options:
+        - idbEngine (IndexedDB — the default)
+        - sqliteEngine (OPFS SQLite)
+        - memoryEngine
+        - a custom StorageEngine
+        - not sure / not storage-related
+    validations:
+      required: true
+
+  - type: dropdown
+    id: persistent
+    attributes:
+      label: If this is about data loss — was `engine.persistent` true?
+      description: >
+        `sqliteEngine` silently falls back to an in-memory database when OPFS
+        is unavailable, and keeps answering every call successfully. Data
+        "not surviving" a reload is the expected result in that state, so this
+        answer decides whether you have found a bug or a misconfiguration.
+      options:
+        - "true"
+        - "false"
+        - "null (engine not opened yet)"
+        - I did not check
+        - Not applicable — not a data-loss issue
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: colada-db version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Browser / runtime
+      description: Browser and version, or Node version for SSR/test environments.
+      placeholder: "Chrome 141 / Safari 26.2 / Node 22.11"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: >
+        Console output, whether it reproduces in a fresh browser profile, and
+        whether `pnpm test:browser` passes locally if you cloned the repo.

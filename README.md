@@ -1,8 +1,12 @@
 # colada-db
 
+[![npm](https://img.shields.io/npm/v/colada-db.svg)](https://www.npmjs.com/package/colada-db)
+[![CI](https://github.com/Danny-Devs/colada-db/actions/workflows/ci.yml/badge.svg)](https://github.com/Danny-Devs/colada-db/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/colada-db.svg)](LICENSE)
+
 **AI-first, local-first client database.** A normalized reactive entity store with pluggable durability engines — in-memory, IndexedDB, and OPFS SQLite — designed from the cornerstone for a world where AI agents are first-class actors in web applications.
 
-> **Status: pre-release.** colada-db is being extracted from [`pinia-colada-plugin-normalizer`](https://github.com/Danny-Devs/pinia-colada-plugin-normalizer) (shipped, on npm since v0.1.0), which becomes its first framework adapter. Not yet published under this name.
+> **Status: 0.1.0, the first release.** Early — the API surface is recorded in [`etc/colada-db.api.md`](etc/colada-db.api.md) and changes to it are deliberate, but this is a 0.x package and breaking changes will happen before 1.0. What ships is what is documented here; **there is no sync layer yet** (see the sync bullet below). colada-db was extracted from [`pinia-colada-plugin-normalizer`](https://github.com/Danny-Devs/pinia-colada-plugin-normalizer), which becomes its first framework adapter.
 
 ## Install
 
@@ -119,8 +123,14 @@ pnpm test:browser   # real Chromium: real IndexedDB + real OPFS SQLite, write �
 cd packages/mcp && pnpm observe   # drive the BUILT agent surface end-to-end
 ```
 
-`pnpm test` is the fast inner loop and runs against in-process stand-ins. `pnpm test:browser` is the lane where the storage is real and the process actually dies — it is deliberately separate so the inner loop stays fast, and it needs a one-time `pnpm exec playwright install chromium`.
+`pnpm test` is the fast inner loop and runs against in-process stand-ins. `pnpm test:browser` is the lane where the storage is real and the page is genuinely torn down between the write and the read — it is deliberately separate so the inner loop stays fast, and it needs a one-time `pnpm exec playwright install chromium`.
+
+## Contributing
+
+Issues and PRs welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the verify commands, the reading order, and the two house rules that explain most review feedback: *a gate is not proven until you have watched it fail*, and *never weaken a gate to make CI green*.
+
+Found a security problem? Please don't open a public issue — see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-MIT
+[MIT](LICENSE) © Danny Devs

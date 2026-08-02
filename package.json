@@ -1,7 +1,6 @@
 {
   "name": "colada-db",
   "version": "0.1.0",
-  "private": true,
   "description": "AI-first, local-first client database — normalized reactive entity store with pluggable durability engines (IndexedDB, OPFS SQLite)",
   "keywords": [
     "local-first",
@@ -23,7 +22,8 @@
   },
   "license": "MIT",
   "author": {
-    "name": "Danny Devs"
+    "name": "Danny Devs",
+    "url": "https://github.com/Danny-Devs"
   },
   "repository": {
     "type": "git",

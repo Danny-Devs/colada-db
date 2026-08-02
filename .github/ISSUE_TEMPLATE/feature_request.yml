@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a capability, or argue that a boundary is in the wrong place
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you trying to do that you cannot do today? Describe the
+        situation, not the solution — the best version of the fix is often not
+        the one either of us thought of first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Optional. If you have a shape in mind, sketch it.
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Where would this live
+      description: >
+        The core stays framework-free and knows nothing about the edge
+        packages (ADR-008). If the answer is "an adapter", this may belong in
+        that adapter's repo instead.
+      options:
+        - Core engine (store, normalize, transactions, persistence)
+        - A storage engine
+        - The agent surface (packages/mcp)
+        - A framework adapter
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: permanence
+    attributes:
+      label: Does this cross an irreversibility line?
+      description: >
+        See `docs/adr/022-the-irreversibility-lines.md`. Ticking one is not a
+        problem — it just means the discussion needs to happen before any code,
+        because these cannot be walked back after a release.
+      options:
+        - label: Persisted format — on-disk row shape, key encoding, index rows
+        - label: Public API surface — exported names, type shapes
+        - label: The publish manifest — which files ship, from which entry points
+        - label: Global registry keys (`Symbol.for("colada-db/entity-ref@N")`)
+        - label: Wire or protocol shapes — the matcher AST, the SyncAdapter contract
+        - label: None of these / not sure
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you have already tried
+      description: >
+        Including workarounds that nearly work. Knowing where they fall short
+        is usually the most useful part of the report.
