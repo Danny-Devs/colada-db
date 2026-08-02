@@ -10,6 +10,58 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **The sync wire protocol `v1`, and it is versioned in the path.**
+  `docs/protocol/sync-wire-protocol-v1.md` is the first normative statement of
+  what a colada-db sync *server* does — verbs, JSON shapes, status codes, where
+  the cursor travels, retention obligations. `src/wire-protocol.ts` carries the
+  parts that must never be re-derived by hand. ADR-023 records the decision.
+
+  **The gap was measurable, not theoretical:** two people implementing
+  `restAdapter` would have built mutually incompatible servers and both would
+  have passed the client conformance kit, which checks that an adapter honours
+  the contract and cannot check that two adapters agree with each other.
+
+  **The framing "should we ship a reference server?" was wrong**, and correcting
+  it is the substance of ADR-023. It complects two decisions with opposite
+  reversibility: the wire protocol can never be changed once a backend speaks it
+  (ADR-022 line 5), while a reference server is a package that can be rewritten
+  or thrown away. Pricing them together guarantees getting one wrong. And the
+  protocol was never optional — the first adapter to ship would have defined it
+  by accident, which is the calcification ADR-006 was frozen early to prevent,
+  recurring one level down where nobody was watching.
+
+  **The version is a path segment (`/sync/v1/pull`), and that is what makes an
+  irreversible artifact survivable.** A published version freezes forever;
+  breaking changes ship as a new path served alongside the old one. Being wrong
+  about `v1` costs a `v2` rather than a migration on somebody else's backend. A
+  test pins the path so a future edit has to be a deliberate, visible act.
+
+  **HTTP status codes carry transport outcomes; the body carries verdicts.**
+  This is the highest-value clause, because it mechanizes the most dangerous
+  confusion in ADR-006 — a transient failure reported as a permanent `reject`
+  destroys a valid user write silently and forever. `classifyWireStatus()` makes
+  that call once instead of asking every adapter author to remember a table:
+  `408`/`429` are transient despite being 4xx, `409` routes to a schema channel
+  that *suspends* the outbox rather than draining it, and **an unrecognized
+  status defaults to transient, never permanent** — a retried write is
+  recoverable and a wrongly-discarded one is not.
+
+  **Authentication is deliberately absent.** No identity model, no token format,
+  no session. Credentials ride standard HTTP headers the protocol never
+  inspects. A protocol that names an identity model inherits its lock-in, and
+  per ADR-0017 an identity model is what an *organization* needs operated — so
+  baking one into the free protocol puts the open-core split in the wrong place.
+
+  **Retention is resolved by a split:** retention of the change *feed* is not
+  retention of the *data*. Entities live forever; the log lives for a bounded
+  window; a client outside the window takes a `reset`, which is a first-class
+  path and not an error. The optional `retentionSeconds` field lets a client
+  resync deliberately instead of discovering expiry through a failed pull.
+
+  17 new tests pin the normative claims, including the numeric-string trap
+  (`"10"` must order after `"9"`, or a backend silently reverses its own
+  history). Suite is 480 → 497.
+
 - **The SyncAdapter conformance kit — the spec stops being a document.**
   `src/sync-conformance.ts` exports `runSyncAdapterContract()`, one contract
   suite any third-party adapter author can run against their own backend, plus
