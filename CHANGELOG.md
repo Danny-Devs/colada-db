@@ -4,6 +4,19 @@
 
 ### Changed
 
+- **AGENTS.md no longer describes the pre-publish world.** Three claims went
+  stale the moment 0.1.0 shipped, in the first file every agent reads: CI was
+  described as ADVISORY with a 403 receipt (it is now blocking, six required
+  checks, `enforce_admins: true`); `"private": true` was described as the guard
+  rail (it is gone, and the rule it enforced matters *more* now, not less —
+  every publish from here reaches real consumers and cannot be un-shipped); and
+  chip 3 was marked gated on the publish (that gate is lifted, which also makes
+  ADR-020's cross-version ref-identity case reachable rather than hypothetical).
+  A manual that confidently states the opposite of reality is worse than no
+  manual, and this one is load-bearing for every agent session.
+
+### Changed
+
 - **`main` is now fully protected — `enforce_admins` is true, and the admin
   exception is closed.** For a few hours after branch protection went on, the
   honest sentence was "CI is binding for contributors, advisory for the admin";
