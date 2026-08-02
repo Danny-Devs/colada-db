@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+Findings from an independent pre-publish review, run as a fresh reviewer against
+ADR-022's six irreversibility lines. Two real defects on the lines themselves,
+both fixed here; the rest are first-run and disclosure gaps. Recorded with the
+six Keep-a-Changelog types (the workspace convention as of 2026-08-01) rather
+than this file's older `[feat]`/`[fix]` tags.
+
+### Added
+
+- **`SECURITY.md`** — there was no private vulnerability-disclosure path for a
+  package that holds user data and ships an agent surface. Points at GitHub
+  private advisories rather than an email address. (Private vulnerability
+  reporting was enabled on the repo once it went public, so the link resolves.) Scope
+  section names what counts (allowlist bypass on the MCP surface, matcher
+  escapes, a veto that fails to veto) and what is a documented boundary rather
+  than a defect (origin tags are attribution, not authentication; no encryption
+  at rest).
+
+- **CI proves the API differ can fail before trusting it to pass.**
+  `check-api-report.mjs` shipped a `--selftest` that nothing invoked, while
+  `check-pack-manifest.sh` and `cross-check-publish-surface.sh` both self-test
+  inline on every run. The newest publish gate was the one odd one out.
+
+- **The open-source furniture a stranger expects.** Every doc in this repo was
+  written for maintainers and agents; a first-time visitor had a README and
+  nothing else. Added `CONTRIBUTING.md` (verify commands, reading order, the
+  append-only ADR rule, when to regenerate the api-report and the pack
+  manifest), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), and GitHub issue
+  and PR templates. The templates are shaped around this codebase rather than
+  the defaults: the bug form asks **which engine** and **whether
+  `engine.persistent` was true**, because `sqliteEngine` silently falls back to
+  an in-memory database when OPFS is unavailable and "my data disappeared" is
+  the expected result in that state — that one answer decides whether a report
+  is a bug or a misconfiguration. The feature form asks whether the proposal
+  crosses an ADR-022 irreversibility line. `.editorconfig` and `.nvmrc` too.
+
 ### Changed
 
 - **AGENTS.md no longer describes the pre-publish world.** Three claims went
@@ -14,8 +49,6 @@
   ADR-020's cross-version ref-identity case reachable rather than hypothetical).
   A manual that confidently states the opposite of reality is worse than no
   manual, and this one is load-bearing for every agent session.
-
-### Changed
 
 - **`main` is now fully protected — `enforce_admins` is true, and the admin
   exception is closed.** For a few hours after branch protection went on, the
@@ -31,6 +64,91 @@
   admin escape hatch, with the rule that using the hatch is fine and using it
   silently is not. `CONTRIBUTING.md` states the PR requirement and the
   `[skip ci]` trap for contributors.
+
+- **Branch protection is live on `main`; ADR-021 no longer describes a gate it
+  did not have.** Going public at the 0.1.0 publish unlocked branch protection,
+  which is the condition ADR-021 named on 2026-07-23 when it recorded — honestly,
+  and as its own central argument — that CI was advisory. Six required checks,
+  not the five originally listed: `browser durability lane` was added, since
+  requiring every check *except* the only one where storage is real would have
+  been the precise error the ADR is about. Force pushes and branch deletion are
+  blocked for everyone. `enforce_admins` is deliberately **false** so the solo
+  maintainer keeps direct pushes, and the ADR states the resulting true rung:
+  binding for contributors, advisory for the admin. The 2026-07-23 section is
+  kept verbatim under a supersession note — an ADR that argues for stating the
+  real enforcement level should keep the evidence that its level was once low.
+
+- **`StorageEngine`'s `version` slot widened to `string | number`** (ADR-022
+  line 2), matching `EntityEvent.version`. It was `number` while the event
+  allowed both — even though the engine's own JSDoc names a *server timestamp*
+  as a legitimate source, and the causal stamp it eventually wants would most
+  likely be a hybrid logical clock. Both are strings. With the `version`
+  semantic still open under DAN-736, the narrower type would have decided it by
+  accident in the one direction publish makes unfixable: widening a return type
+  afterwards breaks every consumer that reads it. No code anywhere performed
+  arithmetic on it. `etc/colada-db.api.md` regenerated in the same commit — the
+  gate caught the change and named the exact line before it was updated.
+
+- **README quickstart now compiles.** `contact.value.name` failed `TS18048:
+  'contact.value' is possibly 'undefined'` under `--strict` — the first code a
+  new consumer copies, in the file npm renders as the landing page. Also added
+  the two things it never showed: `EntityRegistry` module augmentation (the
+  mechanism that makes reads typed rather than `Record<string, unknown>`), and
+  an actual normalization example — the headline capability had no code in the
+  README at all. Every snippet is now compiled against the packed tarball under
+  both `bundler` and `nodenext` resolution.
+
+- **`prepublishOnly` runs the whole workspace and the durability lane.** It ran
+  `pnpm test` (root only, so `packages/mcp`'s 29 tests never ran) and never
+  `pnpm test:browser`. Since ADR-021 records CI as advisory pending branch
+  protection, the last automatic gate before a real `npm publish` was the one
+  that skipped the only lane where storage is real.
+
+- **`llms.txt` no longer denies the flagship feature exists.** It stated the
+  four AI-first trust primitives were "designed and audited, not yet in this
+  build"; they shipped 2026-07-19 and all four are exported from the package
+  root. Source map and verify commands brought current, `packages/mcp` added,
+  and what is genuinely absent (sync) stated plainly.
+
+### Removed
+
+- **`"private": true`.** The publish block is lifted — `colada-db` is now
+  publishable. Nothing is on the registry until `npm publish` is run by hand.
+  README's status block now describes a 0.x first release rather than an
+  unpublished extraction, and carries npm/CI/license badges. This is ADR-022
+  lines 3 and 6 going live.
+
+### Fixed
+
+- **The persisted-format stamp did not reach the common case (ADR-018, ADR-022
+  line 1).** `formatVersion` is the only escape hatch the on-disk format has,
+  it lives in the manifest index row, and that row was materialized **only when
+  `setManifest`/`removeManifest` had been called.** So every database created
+  on the default `hydration: "all"` path — exactly what the README quickstart
+  teaches — was written with no version marker anywhere on disk. The read side
+  was never the gap: both boot paths already parse and skip the index row, so
+  only the write side was conditional. The row is now stamped on the first
+  flush that persists anything; a coordinator that persists nothing still
+  writes nothing. Four tests in `src/format-version.spec.ts`, watched to fail
+  first (3 of 4 red with the fix reverted, while the "persists nothing"
+  negative control stayed green in both directions).
+
+- **A dotted matcher field silently matched nothing.** `M.eq("a.b", 2)` against
+  `{ a: { b: 2 } }` returns `false` — fields are flat own-property names and
+  there is no path traversal. Behavior is unchanged and deliberate (an entity
+  may own a key containing a dot; reserving the character would make that key
+  unfilterable), but the only thing asserting it was prose, and the failure is
+  silent — on the agent surface a nested-intent filter reads as a confident
+  "no matches". Now stated in the `matcher.ts` module docs, on `M`, and in
+  `docs/design/matcher-semantics.md`, and pinned by three tests.
+
+- **`npm publish --dry-run` failed on this repo, and the publish did not.** npm
+  exports `npm_config_dry_run=true` into every lifecycle script it runs, so the
+  nested `pnpm pack` inside `check-pack-manifest.sh` printed a file list and
+  wrote no tarball — the gate then counted zero and failed. The rehearsal you
+  run *because* the real thing is irreversible was the one command that broke.
+  Sixth instance of this repo's recurring family, and the first in the safe
+  direction (see `LESSONS.md`).
 
 ### Security
 
@@ -50,127 +168,6 @@
   unsupported is being forced. `pnpm audit`: no known vulnerabilities. Verified
   the bump did not disturb the agent surface — 29 tests plus the 8-check
   observe-run against the built server.
-
-### Changed
-
-- **Branch protection is live on `main`; ADR-021 no longer describes a gate it
-  did not have.** Going public at the 0.1.0 publish unlocked branch protection,
-  which is the condition ADR-021 named on 2026-07-23 when it recorded — honestly,
-  and as its own central argument — that CI was advisory. Six required checks,
-  not the five originally listed: `browser durability lane` was added, since
-  requiring every check *except* the only one where storage is real would have
-  been the precise error the ADR is about. Force pushes and branch deletion are
-  blocked for everyone. `enforce_admins` is deliberately **false** so the solo
-  maintainer keeps direct pushes, and the ADR states the resulting true rung:
-  binding for contributors, advisory for the admin. The 2026-07-23 section is
-  kept verbatim under a supersession note — an ADR that argues for stating the
-  real enforcement level should keep the evidence that its level was once low.
-
-Findings from an independent pre-publish review, run as a fresh reviewer against
-ADR-022's six irreversibility lines. Two real defects on the lines themselves,
-both fixed here; the rest are first-run and disclosure gaps. Recorded with the
-six Keep-a-Changelog types (the workspace convention as of 2026-08-01) rather
-than this file's older `[feat]`/`[fix]` tags.
-
-### Fixed
-
-- **The persisted-format stamp did not reach the common case (ADR-018, ADR-022
-  line 1).** `formatVersion` is the only escape hatch the on-disk format has,
-  it lives in the manifest index row, and that row was materialized **only when
-  `setManifest`/`removeManifest` had been called.** So every database created
-  on the default `hydration: "all"` path — exactly what the README quickstart
-  teaches — was written with no version marker anywhere on disk. The read side
-  was never the gap: both boot paths already parse and skip the index row, so
-  only the write side was conditional. The row is now stamped on the first
-  flush that persists anything; a coordinator that persists nothing still
-  writes nothing. Four tests in `src/format-version.spec.ts`, watched to fail
-  first (3 of 4 red with the fix reverted, while the "persists nothing"
-  negative control stayed green in both directions).
-- **A dotted matcher field silently matched nothing.** `M.eq("a.b", 2)` against
-  `{ a: { b: 2 } }` returns `false` — fields are flat own-property names and
-  there is no path traversal. Behavior is unchanged and deliberate (an entity
-  may own a key containing a dot; reserving the character would make that key
-  unfilterable), but the only thing asserting it was prose, and the failure is
-  silent — on the agent surface a nested-intent filter reads as a confident
-  "no matches". Now stated in the `matcher.ts` module docs, on `M`, and in
-  `docs/design/matcher-semantics.md`, and pinned by three tests.
-
-### Changed
-
-- **`StorageEngine`'s `version` slot widened to `string | number`** (ADR-022
-  line 2), matching `EntityEvent.version`. It was `number` while the event
-  allowed both — even though the engine's own JSDoc names a *server timestamp*
-  as a legitimate source, and the causal stamp it eventually wants would most
-  likely be a hybrid logical clock. Both are strings. With the `version`
-  semantic still open under DAN-736, the narrower type would have decided it by
-  accident in the one direction publish makes unfixable: widening a return type
-  afterwards breaks every consumer that reads it. No code anywhere performed
-  arithmetic on it. `etc/colada-db.api.md` regenerated in the same commit — the
-  gate caught the change and named the exact line before it was updated.
-- **README quickstart now compiles.** `contact.value.name` failed `TS18048:
-  'contact.value' is possibly 'undefined'` under `--strict` — the first code a
-  new consumer copies, in the file npm renders as the landing page. Also added
-  the two things it never showed: `EntityRegistry` module augmentation (the
-  mechanism that makes reads typed rather than `Record<string, unknown>`), and
-  an actual normalization example — the headline capability had no code in the
-  README at all. Every snippet is now compiled against the packed tarball under
-  both `bundler` and `nodenext` resolution.
-- **`prepublishOnly` runs the whole workspace and the durability lane.** It ran
-  `pnpm test` (root only, so `packages/mcp`'s 29 tests never ran) and never
-  `pnpm test:browser`. Since ADR-021 records CI as advisory pending branch
-  protection, the last automatic gate before a real `npm publish` was the one
-  that skipped the only lane where storage is real.
-- **`llms.txt` no longer denies the flagship feature exists.** It stated the
-  four AI-first trust primitives were "designed and audited, not yet in this
-  build"; they shipped 2026-07-19 and all four are exported from the package
-  root. Source map and verify commands brought current, `packages/mcp` added,
-  and what is genuinely absent (sync) stated plainly.
-
-### Added
-
-- **`SECURITY.md`** — there was no private vulnerability-disclosure path for a
-  package that holds user data and ships an agent surface. Points at GitHub
-  private advisories rather than an email address. **Danny must enable "Private
-  vulnerability reporting" in repo settings for the link to work.** Scope
-  section names what counts (allowlist bypass on the MCP surface, matcher
-  escapes, a veto that fails to veto) and what is a documented boundary rather
-  than a defect (origin tags are attribution, not authentication; no encryption
-  at rest).
-- **CI proves the API differ can fail before trusting it to pass.**
-  `check-api-report.mjs` shipped a `--selftest` that nothing invoked, while
-  `check-pack-manifest.sh` and `cross-check-publish-surface.sh` both self-test
-  inline on every run. The newest publish gate was the one odd one out.
-
-- **The open-source furniture a stranger expects.** Every doc in this repo was
-  written for maintainers and agents; a first-time visitor had a README and
-  nothing else. Added `CONTRIBUTING.md` (verify commands, reading order, the
-  append-only ADR rule, when to regenerate the api-report and the pack
-  manifest), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), and GitHub issue
-  and PR templates. The templates are shaped around this codebase rather than
-  the defaults: the bug form asks **which engine** and **whether
-  `engine.persistent` was true**, because `sqliteEngine` silently falls back to
-  an in-memory database when OPFS is unavailable and "my data disappeared" is
-  the expected result in that state — that one answer decides whether a report
-  is a bug or a misconfiguration. The feature form asks whether the proposal
-  crosses an ADR-022 irreversibility line. `.editorconfig` and `.nvmrc` too.
-
-### Fixed (publish tooling)
-
-- **`npm publish --dry-run` failed on this repo, and the publish did not.** npm
-  exports `npm_config_dry_run=true` into every lifecycle script it runs, so the
-  nested `pnpm pack` inside `check-pack-manifest.sh` printed a file list and
-  wrote no tarball — the gate then counted zero and failed. The rehearsal you
-  run *because* the real thing is irreversible was the one command that broke.
-  Sixth instance of this repo's recurring family, and the first in the safe
-  direction (see `LESSONS.md`).
-
-### Removed
-
-- **`"private": true`.** The publish block is lifted — `colada-db` is now
-  publishable. Nothing is on the registry until `npm publish` is run by hand.
-  README's status block now describes a 0.x first release rather than an
-  unpublished extraction, and carries npm/CI/license badges. This is ADR-022
-  lines 3 and 6 going live.
 
 ## [2026-08-01] — publish preflight: the last unmet ADR-022 precondition, and the oracle bug CI found on an unlucky seed
 
