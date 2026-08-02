@@ -837,3 +837,49 @@ successfully, never guard an assertion with one. Hoist the condition to the
 suite level and skip explicitly. And never ship a conformance kit that has not
 been watched to fail — a kit asserting nothing passes every implementation and
 reads as rigour.
+
+## [2026-08-02] — verify the PREMISE; a valid argument on a false fact passes every review
+
+**Mistake:** ADR-018 made a clean break on the persisted format — `__pcn_ref` →
+`__cdb_ref`, `pcn_entities` → `cdb_entities` — with **no migration and no
+dual-read**, justified on two stated facts. Fact 2 was: *"The Vue/Pinia adapter
+has never shipped persisted data either (the plugin-swap is chip 3, still gated
+on publish)."*
+
+That is false, and it was falsifiable in one command the whole time.
+`pinia-colada-plugin-normalizer@0.3.0` is published on npm — releases back to
+`0.1.8`, 294 downloads in the last month — and its shipped bundle contains
+`enablePersistence`, `idbEngine`, `pcn_entities` and `__pcn_ref`. Real databases
+exist in the wild under the old names. Chip 3 as planned would have started,
+found nothing under the new names, and presented an empty database with no error.
+
+**Why it happened:** the parenthetical is the whole error. *"The plugin-swap is
+chip 3, still gated on publish"* is a true statement about **the plugin
+depending on colada-db**. It was used to support a different claim — that **the
+plugin does not persist**. The plugin has always persisted; it does so through
+its own frozen fork of the engine, which is the entire reason the fork exists.
+
+Two propositions about one package got conflated because one *sounds* like it
+implies the other. Nothing was hidden and nobody was careless — the premise was
+simply never checked against the registry.
+
+**The reason it survived review:** ADR-018's argument is *valid*. Its conclusion
+follows correctly from its stated facts. A reviewer checking whether the
+reasoning holds will pass a sound argument built on a false premise every single
+time, because the defect is not in the reasoning. This is also why the ADR reads
+as more rigorous than an ADR that had simply guessed — it showed its work.
+
+**Fix:** ADR-024 amends ADR-018 (naming decision preserved, migration obligation
+added, chip 3 becomes a major version that must either read the legacy stores
+forward or refuse loudly — never start silently empty). ADR-018 carries a
+reciprocal warning in its header so it cannot be read alone. And the rule:
+
+> Before any ADR asserts what a package has or has not shipped, run
+> `npm view <pkg> versions`, unpack the tarball, and paste the output into the
+> ADR. It costs one command.
+
+**For future agents:** when an argument depends on a fact about the outside world
+— what is published, what is deployed, what a vendor's licence says, what a spec
+requires — **verify the fact, not the inference.** Ask "is this still true?"
+before "does this follow?" A registry, a deployed artifact, or a raw source file
+is the system of record; a document that summarizes one is not.

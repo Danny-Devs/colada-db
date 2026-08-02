@@ -99,7 +99,19 @@ export { createCoalescer } from "./coalesce";
 
 // ─── Pagination merge recipes ───
 export { cursorPagination, offsetPagination, relayPagination } from "./pagination";
-export type { RelayPageInfo } from "./pagination";
+// All six public types of the module, not one of them. Through 0.1.0 this
+// barrel exported `RelayPageInfo` alone while the other five were `export
+// interface` in `pagination.ts` — and since `package.json` exposes only `"."`,
+// there was no deep-import escape hatch. A caller of `cursorPagination` could
+// not name the type of the options object they were required to pass.
+export type {
+  RelayPageInfo,
+  RelayEdge,
+  RelayConnection,
+  CursorPaginationOptions,
+  OffsetPaginationOptions,
+  RelayPaginationOptions,
+} from "./pagination";
 
 // ─── Entity definitions & types ───
 export { defineEntity, ENTITY_REF_MARKER } from "./types";

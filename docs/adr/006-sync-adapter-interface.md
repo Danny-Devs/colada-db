@@ -111,6 +111,16 @@ interface SyncAdapter {
 }
 ```
 
+### Implementation note (2026-08-02) — where the outbox actually taps the store
+
+§1 below says *"`commit()` moves its mutations into a durable outbox."* **That sentence describes a mechanism the shipped API does not offer**, and whoever builds the coordinator needs to know before starting rather than after.
+
+`TransactionSettledEvent` carries `{ transactionId, outcome }` and **nothing else** — it never says what the mutations were. A coordinator built on `onSettled` alone produces an outbox of empty entries. *`src/transactions.ts:112-115`*
+
+**The tap is `store.subscribe()`, and it is better than what this ADR imagined.** `EntityEvent` already carries `origin`, `transactionId` *and* `version`, so filtering on `origin === "local-mutation"` yields the outbox feed, the transaction grouping §1 needs for atomic server apply, and the version for `baseVersion` — from one subscription. *`src/types.ts:161-220`*
+
+**And it makes §2 unfalsifiable rather than merely required.** Echo suppression stops being something the coordinator must remember to implement: remote changes are applied under `sync-pull`, so they simply never match the filter. A bug that re-enqueues an echo becomes unwriteable instead of unlikely.
+
 ### Coordinator semantics (`enableSync(store, { adapter, ... })`)
 
 1. **The outbox is the existing optimistic-transaction system.** A local mutation = optimistic tx (already shipped, 0.2.0): `commit()` moves its mutations into a durable outbox (persisted via the StorageEngine, so pending pushes survive reloads — and stored in a SEPARATE file/store from entity state, so a state reset never destroys unpushed writes); `push()` verdicts drive it; `reject` triggers the existing rollback machinery immediately; `transform` applies the server's corrected entity and any id remap immediately, but **does not complete** — its overlay waits on the pull channel exactly like `ack` (rev d / D2).
