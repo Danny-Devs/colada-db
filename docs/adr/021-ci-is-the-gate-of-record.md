@@ -1,11 +1,68 @@
 # ADR-021: CI is the gate of record, and the Node matrix splits toolchain floor from artifact floor
 
-**Status:** Accepted — **enforcement LIVE as of 2026-08-02, see below**
+**Status:** Accepted — **enforcement LIVE and FULL as of 2026-08-02**
 **Implementation:** shipped
 **Date:** 2026-07-23
 **Context ticket:** DAN-658
 
-## Enforcement status (as of 2026-08-02) — CI IS BINDING, with one stated exception
+## Enforcement status (as of 2026-08-02, second revision) — no exceptions left
+
+`enforce_admins` is now **true**. The admin exception recorded a few hours
+earlier (kept below) is closed: the sole maintainer is bound by the same six
+required checks as anyone else, and `main` accepts no direct pushes from
+anybody. Every change reaches `main` through a pull request whose checks
+passed.
+
+This was raised deliberately in anticipation of a second contributor, and it
+removes the last gap between this ADR's title and its behavior. **"CI is the
+gate of record" is now true without qualification** — which is the first time
+that sentence has been literally accurate since the ADR was written.
+
+Verified by watching it fail, per this repo's standing rule. A direct push to
+`main` as the repository owner:
+
+```
+$ git push origin main
+! [remote rejected] main -> main (protected branch hook declined)
+remote: error: Changes must be made through a pull request.
+```
+
+Required approvals remain **0**. A solo maintainer cannot approve their own PR
+under GitHub's rules, so requiring one approval would deadlock the repo today;
+0 keeps the *process* mandatory (a PR, with green checks) without inventing a
+reviewer who does not exist. Raise it to 1 when a second contributor is real —
+that is a one-line change and the natural next rung.
+
+### The lockout hazard, and the escape hatch
+
+Full enforcement has a failure mode worth writing down before it bites:
+
+- **A renamed CI job locks `main`.** Required checks are matched by exact name.
+  Rename `gate (node 22)` in the workflow and the old context is never reported
+  again — it sits *pending forever* and nothing can merge. **Any change to a job
+  name in `.github/workflows/ci.yml` must be paired with an update to the
+  required-contexts list in the same change.**
+- **An Actions outage locks `main`.** Nothing to do but wait, or lift
+  protection.
+
+The escape hatch, which an admin always retains, is to disable enforcement,
+land the fix, and re-enable:
+
+```bash
+gh api -X PATCH repos/Danny-Devs/colada-db/branches/main/protection/enforce_admins  # off
+# ...land the fix...
+gh api -X POST  repos/Danny-Devs/colada-db/branches/main/protection/enforce_admins  # on
+```
+
+Using that hatch is not a policy violation; *using it silently* is. Say so in
+the commit that follows.
+
+## Enforcement status (as of 2026-08-02, first revision) — CI IS BINDING, with one stated exception
+
+> **[SUPERSEDED the same day — see the section above.]** Retained because the
+> gap between "binding for contributors" and "binding" is exactly the kind of
+> distinction this ADR exists to keep visible, and a record that it was stated
+> honestly for the hours it was true is worth more than a tidy page.
 
 The condition named in the 2026-07-23 section below was met: the repository went
 public at the 0.1.0 publish, which unlocked branch protection on this plan.

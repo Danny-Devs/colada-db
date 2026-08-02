@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`main` is now fully protected — `enforce_admins` is true, and the admin
+  exception is closed.** For a few hours after branch protection went on, the
+  honest sentence was "CI is binding for contributors, advisory for the admin";
+  it is now binding for everyone, with no direct pushes to `main` from anybody.
+  ADR-021's title is literally accurate for the first time since it was written.
+  Verified by watching it fail: a direct push as the repository owner is
+  rejected with `protected branch hook declined`. Required approvals stay at 0 —
+  a solo maintainer cannot approve their own PR, so requiring one would deadlock
+  the repo; 0 keeps the process mandatory without inventing a reviewer who does
+  not exist. ADR-021 also now records the lockout hazard this creates (a renamed
+  CI job leaves a required context pending forever and blocks `main`) and the
+  admin escape hatch, with the rule that using the hatch is fine and using it
+  silently is not. `CONTRIBUTING.md` states the PR requirement and the
+  `[skip ci]` trap for contributors.
+
 ### Security
 
 - **GHSA-frvp-7c67-39w9 cleared from the dependency tree** (moderate, CVSS 5.9 —

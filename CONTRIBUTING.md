@@ -90,6 +90,21 @@ enforces this; read its message rather than reaching for an ignore.
 
 ## Pull requests
 
+`main` is protected and accepts **no direct pushes from anyone**, maintainer
+included. Every change arrives through a PR whose six required checks passed:
+`gate (node 20 | 22 | 24)`, `browser durability lane`, `publish surface`, and
+`engines floor (node 18 consumer)`. Your branch also has to be up to date with
+`main` before it can merge.
+
+Two consequences worth knowing before they surprise you:
+
+- **Don't use `[skip ci]`.** With required checks, a skipped workflow leaves
+  those contexts *pending* rather than absent, and the PR can never merge.
+- **If you rename a CI job**, the required-contexts list has to change in the
+  same PR — a required check that is never reported blocks `main` permanently.
+
+Then:
+
 - One concern per PR. A refactor and a fix in one diff is two reviews.
 - Update `CHANGELOG.md` under `## [Unreleased]`, written from the reader's
   perspective — *"fixed an issue where X"*, not *"ensured Y always receives Z."*
