@@ -111,6 +111,18 @@ interface SyncAdapter {
 }
 ```
 
+### Implementation note (2026-08-02) — where the outbox actually taps the store
+
+§1 below says *"`commit()` moves its mutations into a durable outbox."* **That sentence describes a mechanism the shipped API does not offer**, and whoever builds the coordinator needs to know before starting rather than after.
+
+`TransactionSettledEvent` carries `{ transactionId, outcome }` and **nothing else** — it never says what the mutations were. A coordinator built on `onSettled` alone produces an outbox of empty entries. *`src/transactions.ts:112-115`*
+
+**The tap is `store.subscribe()`.** `EntityEvent` carries `origin` and `transactionId`, so filtering on `origin === "local-mutation"` yields the outbox feed and the transaction grouping §1 needs for atomic server apply, from one subscription. *`src/types.ts:161-220`*
+
+**`baseVersion` does NOT come from that event, and assuming it does is the trap here.** `EntityEvent.version` exists but is optional and **the in-memory store never populates it** — its own doc comment says so, and `src/store.ts` contains no `version:` assignment. On a local write the field is always `undefined`. The coordinator must read the entity's last-known version from the store instead — the value a previous `sync-pull` apply stamped — and treat its absence as "no baseVersion", never as version zero.
+
+**Echo suppression must be an explicit accept-list, not a deny-list.** Because `origin` is optional, `origin !== "sync-pull"` would sweep in every unstamped write, while `origin === "local-mutation"` admits only what the outbox should carry. An earlier draft of this note claimed the filter made echo suppression "unfalsifiable"; that overstated it. The filter makes the correct behaviour *easy and the incorrect one visible* — it does not make the bug unwriteable, and §2 still owes a test.
+
 ### Coordinator semantics (`enableSync(store, { adapter, ... })`)
 
 1. **The outbox is the existing optimistic-transaction system.** A local mutation = optimistic tx (already shipped, 0.2.0): `commit()` moves its mutations into a durable outbox (persisted via the StorageEngine, so pending pushes survive reloads — and stored in a SEPARATE file/store from entity state, so a state reset never destroys unpushed writes); `push()` verdicts drive it; `reject` triggers the existing rollback machinery immediately; `transform` applies the server's corrected entity and any id remap immediately, but **does not complete** — its overlay waits on the pull channel exactly like `ack` (rev d / D2).

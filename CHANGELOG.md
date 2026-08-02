@@ -10,6 +10,27 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **Pagination is tested. It shipped in `0.1.0` untested, and nobody could tell.**
+  `cursorPagination`, `offsetPagination` and `relayPagination` have been exported
+  from `index.ts` since extraction — with **no test anywhere in this repository.**
+  The only coverage lived in the Vue plugin's frozen fork of the engine, so the
+  module was published untested while *looking* tested, because someone else's
+  copy had tests. Chip 3 deletes that fork, so the coverage was about to go from
+  misplaced to gone.
+
+  24 unit tests ported (`src/pagination.spec.ts`), and **watched to fail** before
+  being trusted: reversing the merge order turns 3 red, removing the dedup pass
+  turns 1 red. Suite 497 → 521.
+
+- **Five pagination types that existed but could not be imported.** `index.ts`
+  exported `RelayPageInfo` alone, while `CursorPaginationOptions`,
+  `OffsetPaginationOptions`, `RelayPaginationOptions`, `RelayEdge` and
+  `RelayConnection` sat unexported in `pagination.ts`. Since `package.json`
+  exposes only `"."`, there was no deep-import escape — **a caller of
+  `cursorPagination` could not name the type of the options object they were
+  required to pass.** Now exported; `etc/colada-db.api.md` regenerated in the same
+  commit per ADR-022 line 2, after watching the gate fail first.
+
 - **The sync wire protocol `v1`, and it is versioned in the path.**
   `docs/protocol/sync-wire-protocol-v1.md` is the first normative statement of
   what a colada-db sync *server* does — verbs, JSON shapes, status codes, where

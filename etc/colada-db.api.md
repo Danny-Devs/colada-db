@@ -377,6 +377,14 @@ interface RelayPageInfo {
   startCursor: string | null;
   endCursor: string | null;
 }
+interface RelayEdge<TNode = EntityRecord> {
+  node: TNode;
+  cursor: string | null;
+}
+interface RelayConnection<TNode = EntityRecord> extends EntityRecord {
+  edges: RelayEdge<TNode>[];
+  pageInfo: RelayPageInfo;
+}
 interface CursorPaginationOptions<T extends EntityRecord = EntityRecord> {
   getCursor: (entity: T) => string | number | null | undefined;
   itemsField?: string;
@@ -386,7 +394,7 @@ interface CursorPaginationOptions<T extends EntityRecord = EntityRecord> {
 declare function cursorPagination<T extends EntityRecord = EntityRecord>(options: CursorPaginationOptions<T>): (existing: T, incoming: T) => T;
 interface OffsetPaginationOptions<T extends EntityRecord = EntityRecord> {
   getOffset: (entity: T) => number;
-  pageSize: number;
+  pageSize?: number;
   itemsField?: string;
   dedupeKey?: string;
 }
@@ -398,7 +406,7 @@ interface RelayPaginationOptions {
   dedupeByCursor?: boolean;
 }
 declare function relayPagination<T extends EntityRecord = EntityRecord>(options?: RelayPaginationOptions): (existing: T, incoming: T) => T;
-export { type ColadaDbSchema, type ColadaRef, ENTITY_REF_MARKER, type EntityDefinition, type EntityEvent, type EntityKey, type EntityRecord, type EntityRef, type EntityRegistry, type EntityStore, type ExportedEntitySchema, type ExportedField, type ExportedRelation, type GateVerdict, type HistoryEntry, type HistoryOptions, type HistoryStore, type IdbEngineOptions, M, MATCHER_MAX_COST, MATCHER_MAX_DEPTH, MATCHER_MAX_LIST_LENGTH, type MatcherClassification, type MatcherComparisonNode, type MatcherExistsNode, type MatcherGroupNode, type MatcherListNode, type MatcherNode, type MatcherNotNode, type MatcherOrderedNode, type MatcherOrderedScalar, type MatcherParseCode, MatcherParseError, type MatcherPredicate, type MatcherScalar, type MatcherView, type MatcherViewDivergence, MatcherViewError, type MatcherViewFilter, type MatcherViewOptions, type MatcherViewTier, type MemoryEngine, type NormalizationResult, type OptimisticTransaction, type OptimisticUpdates, type PersistenceHandle, type PersistenceOptions, type PolicyGate, PolicyVetoError, type ProposedWrite, type RelayPageInfo, type ResolveEntity, type SqliteEngine, type SqliteEngineOptions, type StorageEngine, type StoreBoundary, type TransactionSettledEvent, type WriteMeta, type WriteOrigin, classifyFilter, createCoalescer, createEntityStore, createMatcherView, createOptimisticUpdates, createStoreBoundary, createWriteIdGenerator, cursorPagination, defineEntity, denormalize, enableHistory, enablePersistence, evaluateMatcher, exportSchema, idbEngine, memoryEngine, normalize, offsetPagination, parseMatcher, relayPagination, serializeMatcher, splitEntityKey, sqliteEngine, writeEntitiesToStore };
+export { type ColadaDbSchema, type ColadaRef, type CursorPaginationOptions, ENTITY_REF_MARKER, type EntityDefinition, type EntityEvent, type EntityKey, type EntityRecord, type EntityRef, type EntityRegistry, type EntityStore, type ExportedEntitySchema, type ExportedField, type ExportedRelation, type GateVerdict, type HistoryEntry, type HistoryOptions, type HistoryStore, type IdbEngineOptions, M, MATCHER_MAX_COST, MATCHER_MAX_DEPTH, MATCHER_MAX_LIST_LENGTH, type MatcherClassification, type MatcherComparisonNode, type MatcherExistsNode, type MatcherGroupNode, type MatcherListNode, type MatcherNode, type MatcherNotNode, type MatcherOrderedNode, type MatcherOrderedScalar, type MatcherParseCode, MatcherParseError, type MatcherPredicate, type MatcherScalar, type MatcherView, type MatcherViewDivergence, MatcherViewError, type MatcherViewFilter, type MatcherViewOptions, type MatcherViewTier, type MemoryEngine, type NormalizationResult, type OffsetPaginationOptions, type OptimisticTransaction, type OptimisticUpdates, type PersistenceHandle, type PersistenceOptions, type PolicyGate, PolicyVetoError, type ProposedWrite, type RelayConnection, type RelayEdge, type RelayPageInfo, type RelayPaginationOptions, type ResolveEntity, type SqliteEngine, type SqliteEngineOptions, type StorageEngine, type StoreBoundary, type TransactionSettledEvent, type WriteMeta, type WriteOrigin, classifyFilter, createCoalescer, createEntityStore, createMatcherView, createOptimisticUpdates, createStoreBoundary, createWriteIdGenerator, cursorPagination, defineEntity, denormalize, enableHistory, enablePersistence, evaluateMatcher, exportSchema, idbEngine, memoryEngine, normalize, offsetPagination, parseMatcher, relayPagination, serializeMatcher, splitEntityKey, sqliteEngine, writeEntitiesToStore };
 ```
 
 ## `dist/sqlite-worker.d.mts`

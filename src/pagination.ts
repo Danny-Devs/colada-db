@@ -163,10 +163,26 @@ export interface OffsetPaginationOptions<T extends EntityRecord = EntityRecord> 
   getOffset: (entity: T) => number;
 
   /**
-   * Page size — used to determine where incoming items should be placed
-   * in the merged array when offsets overlap.
+   * RESERVED, and currently inert — pass it or don't.
+   *
+   * ⚠️ It does NOT affect placement. Through 0.1.0 this was declared
+   * **required** and documented as *"used to determine where incoming items
+   * should be placed in the merged array when offsets overlap"* — while the
+   * implementation destructured it as `_pageSize` and never read it. So every
+   * caller was obliged to supply a number that nothing consumed, to obtain
+   * behaviour that did not exist.
+   *
+   * **Placement is derived entirely from `getOffset`**, which is sufficient:
+   * an incoming page announces where it starts, and the merge overlays it at
+   * that index. A page size adds nothing the offset does not already say, and
+   * would contradict it whenever a backend returned a short page.
+   *
+   * Kept (optional) rather than deleted so callers currently passing it keep
+   * compiling. Made optional rather than implemented because the doc comment
+   * was the thing that was wrong — inventing a feature to justify a stale
+   * sentence is how an API grows behaviour nobody asked for.
    */
-  pageSize: number;
+  pageSize?: number;
 
   /**
    * The field on the entity that contains the items array.
@@ -207,12 +223,9 @@ export interface OffsetPaginationOptions<T extends EntityRecord = EntityRecord> 
 export function offsetPagination<T extends EntityRecord = EntityRecord>(
   options: OffsetPaginationOptions<T>,
 ): (existing: T, incoming: T) => T {
-  const {
-    getOffset,
-    pageSize: _pageSize,
-    itemsField = "items",
-    dedupeKey,
-  } = options;
+  // `pageSize` is deliberately NOT destructured — it is reserved and inert, and
+  // an unused binding here is what let the stale doc comment survive unnoticed.
+  const { getOffset, itemsField = "items", dedupeKey } = options;
 
   return (existing: T, incoming: T): T => {
     const existingItems = (existing[itemsField] as unknown[] | undefined) ?? [];

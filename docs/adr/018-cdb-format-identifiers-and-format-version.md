@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Implementation:** shipped
 **Date:** 2026-07-23
+**Amended by:** [ADR-024](024-the-plugin-did-ship-persisted-data.md) — premise 2 is false; the naming decision stands, a migration obligation is added
 
 ## Context
 
