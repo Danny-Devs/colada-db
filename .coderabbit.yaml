@@ -1,0 +1,85 @@
+# CodeRabbit — automated PR review.
+#
+# This file exists because of an interaction that is easy to miss: `main` has
+# `required_conversation_resolution: true`, so EVERY unresolved CodeRabbit
+# comment blocks the merge until a human resolves it. That is deliberate — an
+# automated finding should be answered, not scrolled past — but it means the
+# review profile is a merge-friction setting, not a taste setting.
+#
+# Verified against https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+# before writing; every key below is in the published schema.
+
+language: en-US
+
+reviews:
+  # "chill" over "assertive": with conversation resolution required, a nitpick
+  # and a real defect cost the same to clear, which trains people to resolve
+  # without reading. Fewer, better comments keep the gate meaningful.
+  profile: chill
+
+  # MUST stay false. A CodeRabbit "request changes" on a repo whose sole
+  # maintainer cannot self-approve would deadlock `main` outright.
+  request_changes_workflow: false
+
+  high_level_summary: true
+  poem: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    # Generated or asserted-by-gate artifacts. Reviewing these invites comments
+    # on files whose contents are decided by a script, and where the deliberate
+    # act is regenerating them in the same commit — which a gate already checks.
+    - "!etc/colada-db.api.md"
+    - "!scripts/expected-pack-manifest.txt"
+    - "!pnpm-lock.yaml"
+
+  path_instructions:
+    - path: "src/**/*.ts"
+      instructions: |
+        This is a local-first database. The failure mode is a user's data on
+        their own device, so weight correctness and durability far above style.
+
+        House rules worth enforcing in review:
+        - A gate is not proven until it has been watched to fail. If a PR adds
+          a test or a check, ask what was broken to confirm it goes red.
+        - Never weaken a gate to make CI green. A CI-only failure is a finding.
+        - Shipped source must not reference bare `process` unless dominated by a
+          `typeof process !== "undefined"` guard, and must spell
+          `process.env.NODE_ENV` literally — optional chaining defeats bundler
+          substitution and leaks dev warnings into production builds.
+        - Storage-engine changes need `tests/browser/`, and any survival claim
+          must assert `engine.persistent === true` first; the SQLite worker
+          falls back to an in-memory DB when OPFS is unavailable, so without it
+          a green run proves nothing durable.
+        - Flag anything touching persisted format, exported names or types, the
+          pack manifest, `Symbol.for("colada-db/entity-ref@N")`, or wire shapes.
+          Those are the ADR-022 irreversibility lines: the package is published,
+          so getting one wrong is a migration on someone else's disk.
+
+    - path: "packages/mcp/**/*.ts"
+      instructions: |
+        Read-only agent surface (ADR-011). Deny-by-default is STRUCTURAL: zero
+        write tools are registered, and a write attempt must remain an unknown
+        tool with no handler to reach. Treat any new tool registration, any
+        widening of the per-type allowlist, and any path that returns data for a
+        non-allowlisted type as a security finding, not a design question.
+
+    - path: "docs/adr/**/*.md"
+      instructions: |
+        ADRs are append-only. An accepted ADR is not edited — a reversal earns a
+        NEW ADR that supersedes it, and a resolved item is struck through with a
+        dated note rather than deleted. Flag any diff that rewrites or removes
+        existing ADR prose, and check that `Status:` and `Implementation:` are
+        both present and consistent with what actually shipped.
+
+    - path: "CHANGELOG.md"
+      instructions: |
+        Keep a Changelog format. New entries go under `## [Unreleased]` with
+        exactly ONE heading per type (Added, Changed, Deprecated, Removed,
+        Fixed, Security) — duplicate headings within a release have been a
+        recurring defect here. Entries are written from the reader's
+        perspective: "fixed an issue where X", not "ensured Y receives Z".
+        Past entries are append-only; flag edits to released sections.

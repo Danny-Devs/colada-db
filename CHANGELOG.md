@@ -10,6 +10,23 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **`.coderabbit.yaml` — the automated reviewer is now configured, because it
+  became a merge gate.** CodeRabbit has reviewed every PR here since #10 on
+  defaults, which was harmless while CI was advisory. It is not harmless now:
+  `main` requires conversation resolution, so **every** unresolved CodeRabbit
+  comment blocks the merge. That makes the review profile a merge-friction
+  setting rather than a taste one. Set to `chill` (a nitpick and a real defect
+  cost the same to clear, which trains people to resolve without reading), with
+  `request_changes_workflow: false` — that one must stay off, since a "request
+  changes" verdict on a repo whose sole maintainer cannot self-approve would
+  deadlock `main` outright. Generated and gate-asserted artifacts are filtered
+  out (`etc/colada-db.api.md`, the expected pack manifest, the lockfile), and
+  `path_instructions` teach it this repo's actual rules: watch a gate fail
+  before trusting it, never weaken a gate for green, the `process` guard shape,
+  `engine.persistent` before any survival claim, ADR-022's lines, ADRs are
+  append-only, and one CHANGELOG heading per type. Every key was verified
+  against CodeRabbit's published schema before being written.
+
 - **`SECURITY.md`** — there was no private vulnerability-disclosure path for a
   package that holds user data and ships an agent surface. Points at GitHub
   private advisories rather than an email address. (Private vulnerability
