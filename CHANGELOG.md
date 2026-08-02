@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Branch protection is live on `main`; ADR-021 no longer describes a gate it
+  did not have.** Going public at the 0.1.0 publish unlocked branch protection,
+  which is the condition ADR-021 named on 2026-07-23 when it recorded — honestly,
+  and as its own central argument — that CI was advisory. Six required checks,
+  not the five originally listed: `browser durability lane` was added, since
+  requiring every check *except* the only one where storage is real would have
+  been the precise error the ADR is about. Force pushes and branch deletion are
+  blocked for everyone. `enforce_admins` is deliberately **false** so the solo
+  maintainer keeps direct pushes, and the ADR states the resulting true rung:
+  binding for contributors, advisory for the admin. The 2026-07-23 section is
+  kept verbatim under a supersession note — an ADR that argues for stating the
+  real enforcement level should keep the evidence that its level was once low.
+
 Findings from an independent pre-publish review, run as a fresh reviewer against
 ADR-022's six irreversibility lines. Two real defects on the lines themselves,
 both fixed here; the rest are first-run and disclosure gaps. Recorded with the

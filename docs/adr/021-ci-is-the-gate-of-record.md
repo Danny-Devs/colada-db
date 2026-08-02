@@ -1,11 +1,59 @@
 # ADR-021: CI is the gate of record, and the Node matrix splits toolchain floor from artifact floor
 
-**Status:** Accepted — **enforcement PENDING, see "Enforcement status" below**
-**Implementation:** in-progress
+**Status:** Accepted — **enforcement LIVE as of 2026-08-02, see below**
+**Implementation:** shipped
 **Date:** 2026-07-23
 **Context ticket:** DAN-658
 
+## Enforcement status (as of 2026-08-02) — CI IS BINDING, with one stated exception
+
+The condition named in the 2026-07-23 section below was met: the repository went
+public at the 0.1.0 publish, which unlocked branch protection on this plan.
+Protection is now applied to `main`. Measured, not assumed:
+
+```
+$ gh api repos/Danny-Devs/colada-db/branches/main/protection
+enforce_admins:          false
+allow_force_pushes:      false
+allow_deletions:         false
+required_pull_request_reviews: present (0 approvals — a PR is required, review is not)
+required_status_checks.strict: true
+contexts: gate (node 20) · gate (node 22) · gate (node 24)
+          browser durability lane · publish surface · engines floor (node 18 consumer)
+```
+
+Six required checks, not the five this ADR originally listed: **`browser
+durability lane` was added.** Omitting it would have made every check except the
+only one where storage is real a merge requirement — which is the exact shape of
+error this ADR is about.
+
+**The exception, stated plainly because that is this ADR's whole method.**
+`enforce_admins` is **false**. The sole admin (Danny) can still push directly to
+`main` and is not bound by the required checks. This is deliberate — the repo
+has one maintainer and a solo-maintainer workflow that routes every commit
+through a PR is friction with no reviewer on the other end — but it means the
+honest sentence is **"CI is binding for contributors, and advisory for the
+admin,"** not "CI is binding." Anyone reading a green tick on a commit authored
+by the admin is reading a *report*, not a *gate*. Raising `enforce_admins` to
+true is a one-line change and is the remaining rung.
+
+Force pushes and branch deletion are blocked for everyone, admin included —
+those are not bypassable via `enforce_admins`, and they are the two operations
+that could destroy the history this ADR treats as the record.
+
+`[skip ci]` now behaves differently under required checks, as predicted in the
+section below: a skipped workflow leaves the required contexts **pending**
+rather than absent, so a PR carrying it cannot merge. The absence that used to
+read like green now reads as unfinished. For an admin's direct push it remains
+a real hole, for the same reason as above.
+
 ## Enforcement status (as of 2026-07-23) — CI is ADVISORY, not blocking
+
+> **[SUPERSEDED 2026-08-02 — see the section above.]** Retained verbatim rather
+> than rewritten: this ADR argues that stating the true enforcement rung is
+> load-bearing, and a record of the rung being *low*, later raised, is the
+> evidence that the argument was acted on. Deleting it would leave the claim
+> unfalsifiable.
 
 This ADR is titled "CI is the gate of record." At the time it was written, CI
 **could not be a gate**, and saying so here is the whole point of this section.
