@@ -430,6 +430,10 @@ entity SyncSubscription {
     -- and are NOT awaited — see rule BeginPull's guidance for why not waiting is
     -- the load-bearing half. Lower number = pulled first.
     hydration_priority: Integer
+    -- When this subscription's pull was last REQUESTED. Exists so priority
+    -- ordering is witnessable rather than merely asserted — see invariant
+    -- HigherPriorityIsRequestedFirst.
+    requested_at: Timestamp?
     cursor: Cursor?
     status: idle | pulling | staging | applying | resetting | stopped
     pending_batch_complete: Boolean
@@ -725,6 +729,31 @@ rule RecoverStrandedOutboxOnBoot {
         -- the owner of a client_id it does not hold. What makes that true is a
         -- commit-time obligation — see contract ClientIdentity
         -- (AuthenticationMaterialIsMintedAtCommitTime, AdoptionIsSameDeviceOnly).
+}
+
+rule BeginInitialHydrationInPriorityOrder {
+    when: CoordinatorBooted(coordinator)
+    for subscription in SyncSubscriptions where status = idle:
+        ensures:
+            subscription.requested_at = now
+            PullRequested(subscription: subscription)
+
+    @guidance
+        -- rev d D20, and the rule that makes
+        -- HydrationPriorityOrdersStartsAndNeverBlocks something a conformance
+        -- kit can witness rather than a claim nothing establishes. Without it
+        -- the invariant names an ordering no rule ever produces.
+        --
+        -- Every idle subscription is REQUESTED here, in ascending priority. The
+        -- ensures clause emits PullRequested for all of them: it does not wait
+        -- for the first to reach idle again before emitting the second. That is
+        -- the load-bearing half — awaiting would let one slow high-priority
+        -- partition stall every partition behind it, which is head-of-line
+        -- blocking and a worse failure than unordered hydration.
+        --
+        -- Independent of outbox recovery. RecoverStrandedOutboxOnBoot fires on
+        -- the same trigger and touches only OutboxEntry state, so a client with
+        -- nothing stranded hydrates identically to one that is re-pushing.
 }
 
 -- ── Confirmation: the overlay is dropped on the PULL channel, never on ack ──
@@ -1033,6 +1062,20 @@ invariant StagedBatchesAreNotApplied {
 invariant StoppedSubscriptionsAreQuiescent {
     for subscription in SyncSubscriptions:
         subscription.status = stopped implies subscription.reset_at = null
+}
+
+-- rev d D20, stated as state rather than as sequence, so a conformance kit can
+-- read it after driving a boot. A subscription that matters more is REQUESTED no
+-- later than one that matters less. Note this constrains the request instants
+-- only — it says nothing about completion, which is exactly the point: ordering
+-- the starts is the guarantee, and awaiting them would be head-of-line blocking.
+invariant HigherPriorityIsRequestedFirst {
+    for a in SyncSubscriptions:
+        for b in SyncSubscriptions:
+            a.hydration_priority < b.hydration_priority
+                and a.requested_at != null
+                and b.requested_at != null
+                implies a.requested_at <= b.requested_at
 }
 
 -- rev d D14. An id remap rewrites dependent queued entries' ids AND CLEARS

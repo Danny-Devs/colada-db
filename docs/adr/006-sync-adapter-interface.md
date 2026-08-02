@@ -168,9 +168,11 @@ Consequence: this contract needs *a cursor over an ordered log*, not Postgres. A
 
 Keep `pull()` genuinely side-effect-free, put cursor and predicate in the request **body** rather than the path, and keep responses cacheable. That makes the new HTTP QUERY method — safe, idempotent, *and* cacheable, with a request body — a drop-in when support lands, which buys CDN-cacheable partial sync without adopting a server-evaluated shape model. Do not depend on it yet; the RFC is published but rollout was not measured.
 
-## Rev d (2026-08-02) — the 18 resolutions
+## Rev d (2026-08-02) — the 20 resolutions
 
 Writing the Allium specification of this contract surfaced 20 unresolved points, all recorded as `open question` declarations in `docs/specs/sync-adapter.allium` so none could be lost (DAN-736). Re-reading the ADR would not have found them: a specification forces every clause to be *representable*, and four of them were not. `allium analyse` independently flagged one as a dead trigger.
+
+Eighteen of the twenty were new — exposed by the transcription itself. The other two, D19 and D20, were points this ADR had already been carrying open in its own Consequences section since rev b; the spec merely refused to let them stay unnamed. All twenty are resolved below, so **the count in this heading is the whole set and not a subset.**
 
 These were resolved at the cheapest moment they will ever have — the contract is frozen and the coordinator is unbuilt. **ADR-022 line 5 is why the moment matters:** wire shapes stop being ours the day a real backend speaks them, and both sides are then not ours to upgrade together.
 

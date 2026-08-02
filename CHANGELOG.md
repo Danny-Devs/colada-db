@@ -59,10 +59,11 @@ than this file's older `[feat]`/`[fix]` tags.
 - **ADR-006 rev d — the sync-adapter contract now says one thing per question.**
   Writing the Allium specification of the contract against rev c exposed 20
   unresolved points, four of them outright contradictions where two sections of
-  the same document specified different behaviour (DAN-736). Rev d resolves 18
-  and keeps 2 open deliberately. The contract is frozen and the coordinator is
-  unbuilt, which makes this the cheapest moment these will ever have — ADR-022
-  line 5 means wire shapes stop being ours the day a real backend speaks them.
+  the same document specified different behaviour (DAN-736). **Rev d resolves all
+  twenty**, and the contract now has no open questions. The contract is frozen and
+  the coordinator is unbuilt, which makes this the cheapest moment these will ever
+  have — ADR-022 line 5 means wire shapes stop being ours the day a real backend
+  speaks them.
 
   Every change is additive except one deletion. **A second mutation-confirmation
   path is gone**: `§1b` offered confirmation via "a pulled checkpoint ≥ the ack's
