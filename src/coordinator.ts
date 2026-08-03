@@ -274,12 +274,27 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     };
   }
 
+  /** `open()` succeeded and `close()` has not yet been called — the ONE flag
+   *  close-ownership routes through (landing gauntlet G2/G3: an ad-hoc pair of
+   *  close sites double-closed on stop-during-loadAll and never closed on a
+   *  loadAll fault). */
   let outboxEngineOpened = false;
+  /** Safe to persist/retire rows. Split from `outboxEngineOpened` because a
+   *  loadAll fault must stop WRITES (or fresh seq-1 rows clobber the previous
+   *  session's — review A2) while the handle still gets closed at stop(). */
+  let outboxWritable = false;
+
+  function closeOutboxEngine(): void {
+    if (!outboxEngine || !outboxEngineOpened) return;
+    outboxEngineOpened = false;
+    outboxWritable = false;
+    outboxEngine.close(); // "No calls after close" — the flag guarantees exactly once
+  }
 
   /** Persist one own-client entry plus the seq watermark, best-effort. The
    *  watermark rides on every entry write, so it can only ever grow. */
   function persistEntry(entry: OutboxEntry): void {
-    if (!outboxEngine || !outboxEngineOpened || entry.clientId !== clientId) return;
+    if (!outboxEngine || !outboxWritable || entry.clientId !== clientId) return;
     outboxEngine
       .writeBatch(
         [
@@ -293,7 +308,7 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
 
   /** Delete a retired (confirmed or rejected) entry's persisted row. */
   function retireEntry(entry: OutboxEntry): void {
-    if (!outboxEngine || !outboxEngineOpened || entry.clientId !== clientId) return;
+    if (!outboxEngine || !outboxWritable || entry.clientId !== clientId) return;
     outboxEngine.writeBatch([], [entryKey(entry.seq)]).catch(warnOutboxPersist);
   }
 
@@ -316,19 +331,20 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       if (engine.isSupported()) {
         await engine.open();
         outboxEngineOpened = true;
+        outboxWritable = true;
         // Review B2 (DAN-777 gauntlet): stop() before open() resolved cannot
         // close what is not yet open — so the close is owed HERE. A leaked
         // handle can hold an exclusive OPFS lock and silently degrade the
         // next instance to in-memory, resurrecting the finding-A hazard.
+        // closeOutboxEngine() no-ops when stop() already closed (G3: a stop
+        // firing while loadAll was in flight must not produce a second close).
         if (stopped) {
-          outboxEngineOpened = false;
-          engine.close();
+          closeOutboxEngine();
           return;
         }
         const rows = await engine.loadAll();
         if (stopped) {
-          outboxEngineOpened = false;
-          engine.close();
+          closeOutboxEngine();
           return;
         }
         let watermark = 0;
@@ -369,10 +385,12 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         console.warn("[colada-db sync] outboxEngine.isSupported() is false — outbox is in-memory this session");
       }
     } catch (err) {
-      // Review A2: a read fault must degrade to PURE in-memory. Leaving the
+      // Review A2: a read fault must degrade to PURE in-memory — leaving the
       // engine writable would persist fresh seq-1 rows over the previous
-      // session's still-unpushed entries — §1's one forbidden outcome.
-      outboxEngineOpened = false;
+      // session's still-unpushed entries, §1's one forbidden outcome. The
+      // handle stays OPEN so stop() still releases it (landing gauntlet G2:
+      // flipping the open flag here leaked the handle forever).
+      outboxWritable = false;
       warnOutboxPersist(err);
     }
     if (stopped) return;
@@ -597,11 +615,15 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       // skips the data apply and the sibling replay (nothing was erased); the
       // id remap below still runs — identity correction is not versioned, and
       // queued entries would otherwise keep pushing a dead temp id.
-      const knownBeforeApply = versions.get(toKey(entry.entityType, entry.id));
+      // Checked against BOTH keys (landing gauntlet G1): a remapped transform's
+      // temp id usually has no stamp at all — the newer state it must not
+      // overwrite lives under the TARGET id, which a pull may have stamped
+      // while the verdict was in flight.
+      const olderThanKnown = (known: SyncVersion | undefined): boolean =>
+        verdict.version !== undefined && known !== undefined && compareVersions(verdict.version, known) === "older";
       const staleTransform =
-        verdict.version !== undefined &&
-        knownBeforeApply !== undefined &&
-        compareVersions(verdict.version, knownBeforeApply) === "older";
+        olderThanKnown(versions.get(toKey(entry.entityType, entry.id))) ||
+        olderThanKnown(versions.get(toKey(entry.entityType, targetId)));
       store.runWith({ origin: "sync-pull" as WriteOrigin }, () => {
         if (verdict.data && !staleTransform) {
           applyReplaceOrRemove(entry.entityType, targetId, verdict.data);
@@ -626,7 +648,17 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         // for reject, found by independent review during DAN-776 (part 2's fix only covered reject).
         if (!staleTransform) replaySiblings(entry.entityType, targetId, entry);
       });
-      if (verdict.version !== undefined) stampVersionIfNewer(toKey(entry.entityType, targetId), verdict.version);
+      if (verdict.version !== undefined) {
+        const kTarget = toKey(entry.entityType, targetId);
+        // The stamp follows the applied data (landing gauntlet G4): when the
+        // transform's data WAS applied — which includes a custom comparator's
+        // "concurrent", per §3's posture — the map must say so, or the
+        // server's echo of this very version classifies "concurrent" again
+        // and re-applies. When nothing was applied (stale, or a data-less
+        // remap-only verdict), the guarded stamp keeps the newer mark.
+        if (verdict.data && !staleTransform) versions.set(kTarget, verdict.version);
+        else stampVersionIfNewer(kTarget, verdict.version);
+      }
       entry.pushed = true;
       return;
     }
@@ -898,10 +930,7 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         if (state.pollTimer) clearTimeout(state.pollTimer);
         state.liveDispose?.();
       }
-      if (outboxEngine && outboxEngineOpened) {
-        outboxEngineOpened = false; // no writes after close — persist/retire no-op from here
-        outboxEngine.close();
-      }
+      closeOutboxEngine();
     },
     getRetryState(): RetryState {
       return { ...retryState };

@@ -1014,7 +1014,7 @@ describe("SchemaVersionError detection is name-based, never message-text matchin
  *  the entire subject under test. */
 function fakeOutboxEngine(
   rows: Map<string, unknown> = new Map(),
-  opts: { openDelayMs?: number; failLoadAll?: boolean } = {},
+  opts: { openDelayMs?: number; failLoadAll?: boolean; loadAllDelayMs?: number } = {},
 ) {
   let closes = 0;
   const engine: StorageEngine = {
@@ -1023,6 +1023,7 @@ function fakeOutboxEngine(
       if (opts.openDelayMs) await new Promise((r) => setTimeout(r, opts.openDelayMs));
     },
     async loadAll() {
+      if (opts.loadAllDelayMs) await new Promise((r) => setTimeout(r, opts.loadAllDelayMs));
       if (opts.failLoadAll) throw new Error("simulated loadAll fault");
       return [...rows.entries()].map(([key, data]) => ({ key: key as EntityKey, data }));
     },
@@ -1271,19 +1272,6 @@ describe("DAN-777 review round — lifecycle, fault, and boot-window findings", 
 
   it("A1: a delta-style confirmation mark arriving before the restore completes still retires the restored entry", async () => {
     const rows = new Map<string, unknown>();
-    // Session 1: a pending entry persists, verdict never arrives.
-    const s1 = makeScriptedAdapter();
-    s1.queuePush(() => new Promise<never>(() => {}));
-    const h1 = boot(freshStore(), { adapter: s1.adapter, clientId: "c-a1", outboxEngine: fakeOutboxEngine(rows).engine });
-    await tick(5);
-    const store1 = freshStore(); // (unused holder to keep shape parallel)
-    void store1;
-    // the write goes through the session-1 store bound at boot:
-    // (boot() bound the store above — write via a fresh reference)
-    h1.stop();
-    // Session 1 wrote nothing yet — redo properly: boot bound its own store.
-    expect(rows.size).toBe(0);
-
     const storeA = freshStore();
     const sA = makeScriptedAdapter();
     sA.queuePush(() => new Promise<never>(() => {}));
@@ -1423,5 +1411,126 @@ describe("DAN-777 review round — lifecycle, fault, and boot-window findings", 
     localWrite(store, "Widget", "w1", { id: "w1" });
     await tick();
     expect(scripted.pushCalls[0]![0]!.seq).toBe(3); // numeric, from the watermark — never NaN
+  });
+});
+
+describe("DAN-777 landing gauntlet — the fixes' own siblings", () => {
+  it("G1: a STALE transform carrying a remappedId is judged against the TARGET key's stamp too", async () => {
+    // Landing-gauntlet finding 1: the stale gate consulted only the temp-id
+    // key; a remapped stale transform (temp id has no stamp, server id has a
+    // newer one) sailed through and permanently overwrote the newer state.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              results: [
+                {
+                  mutationId: batch[0]!.mutationId,
+                  status: "transform" as const,
+                  data: { id: "srv-1", label: "STALE-CORRECTION" },
+                  version: 5,
+                  remappedId: "srv-1",
+                },
+              ],
+            });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "temp-1", { id: "temp-1", label: "mine" });
+    await tick(); // push in flight, verdict held
+
+    // The server id's state arrives at v10 while the verdict is in flight.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ id: "srv-1", data: { id: "srv-1", label: "TEN" }, version: 10 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "srv-1").value).toEqual({ id: "srv-1", label: "TEN" });
+
+    release();
+    await tick();
+    // The stale (v5 < v10) correction must not overwrite srv-1's newer state.
+    expect(store.get("Widget", "srv-1").value).toEqual({ id: "srv-1", label: "TEN" });
+  });
+
+  it("G2: a loadAll fault still closes the engine at stop()", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { engine, closeCount } = fakeOutboxEngine(new Map(), { failLoadAll: true });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-g2", outboxEngine: engine });
+    await tick(5); // open succeeded, loadAll threw, degraded to in-memory
+    handle.stop();
+    // The A2 fix protected the ROWS; the handle must still be released, or
+    // its OPFS lock degrades the next instance to in-memory (finding A again).
+    expect(closeCount()).toBe(1);
+  });
+
+  it("G3: stop() while loadAll is in flight closes the engine exactly once", async () => {
+    const { engine, closeCount } = fakeOutboxEngine(new Map(), { loadAllDelayMs: 20 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-g3", outboxEngine: engine });
+    await tick(2); // open resolved; loadAll pending
+    handle.stop(); // closes here...
+    await tick(40); // ...and the boot's post-loadAll stopped-path must NOT close again
+    expect(closeCount()).toBe(1); // "No calls after close" — src/types.ts StorageEngine contract
+  });
+
+  it("G4: with a custom comparator, a 'concurrent' transform's stamp follows its applied data", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    // A comparator that can only say same/concurrent — the CRDT-ish shape D3
+    // exists for. Attached to the scripted adapter's object directly.
+    scripted.adapter.compareVersions = (a, b) => (a === b ? "same" : "concurrent");
+    scripted.queuePull(
+      {
+        type: "changes",
+        changes: [remoteChange({ data: { id: "w1", label: "A" }, version: "vA" })],
+        cursor: "1",
+        complete: true,
+      },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              results: [
+                { mutationId: batch[0]!.mutationId, status: "transform" as const, data: { id: "w1", label: "CORRECTED" }, version: "vB" },
+              ],
+            });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    await tick();
+    localWrite(store, "Widget", "w1", { id: "w1", label: "LOCAL" });
+    await tick();
+
+    release();
+    await tick(); // "concurrent" transform: data IS applied (§3 posture) → stamp must follow to vB
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "CORRECTED" });
+
+    // The probe: the server's echo of vB must classify "same" and be skipped.
+    // A stamp left at vA classifies the echo "concurrent" and re-applies it.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "ECHO" }, version: "vB" })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "CORRECTED" });
   });
 });

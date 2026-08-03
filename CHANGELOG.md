@@ -57,6 +57,21 @@ than this file's older `[feat]`/`[fix]` tags.
   persisted row no longer poisons `seqCounter` to NaN; and `getPendingCount()` counts
   buffered pre-boot writes.
 
+  **The landing gauntlet then found the fixes' own siblings — 3 blockers + 1 advisory, all
+  fixed red-first (suite → 647):** the stale-transform gate consulted only the temp-id key, so
+  a stale transform carrying a `remappedId` (temp id unstamped, target id stamped newer by a
+  mid-flight pull) still overwrote the newer state permanently — the gate now checks both
+  keys; the loadAll-fault fix flipped the open flag without closing, leaking the very handle
+  whose OPFS lock the lifecycle fix exists to release — close-ownership now routes through one
+  helper with split open/writable flags, which also fixed a stop-during-loadAll double-close
+  (the StorageEngine contract forbids calls after close); and with a custom comparator, a
+  "concurrent" transform applied its data but left the stamp behind, so the server's echo
+  re-applied forever — the stamp now follows applied data. Known limitation, by design: entry
+  retirement is a fire-and-forget delete, so a crash in the window between a once-only
+  delta-style confirmation mark and the delete completing can leave a row that re-pushes as a
+  ghost on the next boot; wire-protocol-v1's every-response marks make this unreachable for
+  the shipped stack.
+
 - **`restAdapter` — the first real `SyncAdapter`, and the first time Stage 3 speaks HTTP end to
   end.** `src/rest-adapter.ts` is the client half of wire protocol v1 (DAN-780): it `POST`s the
   §7 bodies to `WIRE_PULL_PATH`/`WIRE_PUSH_PATH` (cursor in the body, never the URL — §2/C5),
