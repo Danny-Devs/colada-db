@@ -10,6 +10,80 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **The sync coordinator — `enableSync(store, opts)` — Stage 3 goes from a frozen contract to a
+  working local-first sync loop.** `src/coordinator.ts` implements every numbered behavior in
+  ADR-006 rev d's "Coordinator semantics": the outbox tap (`store.subscribe()` filtered on
+  `origin === "local-mutation"`, an accept-list), push/pull with confirmation gated solely by the
+  pull channel's `confirmedMutations` (never a push ack alone), version-aware apply with the
+  four-valued comparator, echo suppression, the ADR-004 boundary, `local: true` exclusion,
+  exponential-backoff-with-jitter retry (D9), independent per-subscription reset jitter (D10),
+  schema-mismatch suspension (D12), and same-device sibling-outbox recovery (§1c/D4). `src/
+  coordinator-conformance.ts` + `src/coordinator-conformance.spec.ts` add 35 tests proving all 14
+  named obligations in `SYNC_CONTRACT_COVERAGE.coordinator` plus the ADR's remaining numbered
+  clauses — the highest-risk ones **watched to fail**: the exact mechanism was temporarily broken
+  in `coordinator.ts`, the corresponding test confirmed red, then reverted (recorded on DAN-776,
+  not encoded as permanent mutants — there is exactly one `enableSync()` to mutate against, unlike
+  the many swappable adapters `sync-conformance.ts` protects).
+
+  **Not exported from `index.ts`** — same ADR-022 lines 1-2 precedent as `sync-types.ts` /
+  `sync-conformance.ts`. Suite goes 522 → 557 (plus `packages/mcp`'s 29, unchanged).
+
+  **Two implementation gaps found writing this, both resolved in ADR-006 itself** ("Implementation
+  note, part 2"): §1's "`reject` triggers the existing rollback machinery" describes a mechanism
+  `transactions.ts` cannot offer post-commit (`rollback()` is only reachable before `commit()`
+  splices the transaction out) — the fix reads `EntityEvent.previousData`, already captured for
+  free, and reverts under a new `origin: "undo"` write channel instead. And `transform`'s "rekey
+  entity... one move event" has no single-event primitive to build from (`EntityStore` has no
+  rename), so it composes as `set(newId)` + `remove(oldId)`.
+
+  **A third gap — this one an actual bug, not a spec gap — found by an independent fresh-context
+  review of the diff before landing:** the transform branch applied the server's corrected entity
+  immediately (per D2) but never replayed a second, still-unconfirmed writer to the same key on
+  top of it — the exact hazard the reject-path fix above was written to prevent, just left unfixed
+  on the sibling branch. Also fixed from the same review: a thrown `pull()` was an unhandled
+  promise rejection that permanently killed that subscription (now retries with the same
+  backoff+jitter shape as push); a rejected *adopted* (sibling-recovered) outbox entry always
+  reverted to non-existence regardless of what it actually overwrote, because
+  `StrandedOutboxEntry` never carried `previousData`; and a schema-suspended outbox had no way to
+  resume (`resumeAfterSchemaMigration()` added — D12 says a mismatch suspends the outbox but never
+  says how suspension lifts, and the coordinator cannot detect an app-level migration on its own).
+
+  **Four more defects found by the landing gauntlet's second fresh-context review, all fixed here
+  before merge** (each new test watched to fail against the unfixed coordinator first): a `reject`
+  verdict arriving after a pull had applied a newer version reverted the store to commit-time
+  `previousData` anyway — and because `versions` kept the newer stamp, the identical re-pull
+  classified as "same" and was skipped, so the store diverged from the server *permanently*. The
+  fix took three review rounds to get right, and the intermediate designs are worth recording:
+  gating the revert on the **version map** (round 1's fix) conflated "stamp advanced" with
+  "content changed" — an ack stamps a version *without* writing the store, which falsely
+  suppressed the revert of a rejected same-key sibling; gating on a **pull-write counter alone**
+  (round 2's fix) missed that a transform's data-apply is an authoritative store write outside
+  the pull path, and that merely *declining* to revert is insufficient anyway once the
+  transform's sibling replay has baked the about-to-be-rejected edit on top of the correction.
+  The landed design: a per-key **server-write generation counter** (pull-applies + transform
+  data-applies, never ack stamps) plus a **server shadow** — an unchanged generation reverts to
+  commit-time `previousData`; a changed one **re-bases onto the shadow**. The shadow is
+  maintained patch-over-patch (round 4's finding: pull payloads are partial patches the apply
+  path *merges*, so caching a raw patch and re-applying it as a replacement drops every field
+  the patch didn't carry — and post-apply `store.get()` is not the answer either, since that
+  would bake unconfirmed pending local edits into "server truth"). Adopted (sibling-recovered)
+  entries take the session-floor generation 0 rather
+  than adoption-time capture, which races the boot pull — their `previousData` is from a
+  previous session by construction, so any server write this session supersedes it. Every
+  scenario above is a named test, each watched to fail against the code that preceded it; the
+  200-iteration pull bound *applied* its accumulated incomplete pages when an adapter never set
+  `complete: true` — the exact pathological adapter the bound defends against — violating
+  StagedBatchesAreNotApplied (bound-hit now discards, rewinds the cursor to the cycle start, and
+  retries with backoff; the thrown-`pull()` path had the same cursor leak — earlier successful
+  pages' changes were skipped past forever — and rewinds now too); poll-mode boot started **two**
+  self-perpetuating poll chains (permanent 2× poll rate) of which one timer survived `stop()`; and
+  `SchemaVersionError` detection matched the string anywhere in the message
+  (`/SchemaVersionError/.test(String(err))`), so a proxy relaying a server stack trace would
+  permanently suspend the outbox on a retryable blip — now name-based. The review also replaced a
+  test that asserted nothing (boot, zero writes, expect zero pushes — green against any
+  implementation) with one that falsifies the deny-list origin filter (`origin !== "sync-pull"`),
+  verified red against exactly that mutant. Suite 557 → 566.
+
 - **Pagination is tested. It shipped in `0.1.0` untested, and nobody could tell.**
   `cursorPagination`, `offsetPagination` and `relayPagination` have been exported
   from `index.ts` since extraction — with **no test anywhere in this repository.**
