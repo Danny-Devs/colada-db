@@ -825,7 +825,10 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       return { ...retryState };
     },
     getPendingCount(): number {
-      return outbox.length;
+      // Pre-boot buffered writes are unconfirmed local writes too — hiding
+      // them would make "has everything landed?" read 0 during the one window
+      // where a write is at its most volatile.
+      return outbox.length + (preBootBuffer?.length ?? 0);
     },
     resumeAfterSchemaMigration(): void {
       if (!pushSuspendedForSchema) return;
