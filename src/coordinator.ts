@@ -86,6 +86,13 @@ export interface RetryState {
   attempt: number;
   nextRetryAt: number | null;
   suspendedForSchema: boolean;
+  /** The durable outbox could not be read at boot (CodeRabbit round, R1):
+   *  the previous session's seq watermark is unknowable, so pushing virgin
+   *  seqs would collide with burned ones and be silently ignored server-side.
+   *  New local writes stay buffered (visible via `getPendingCount`) and are
+   *  never pushed this session; recovery is a fresh `enableSync()` once
+   *  storage heals. Visibly stuck beats silently ignored — D9's doctrine. */
+  suspendedForOutboxFault: boolean;
 }
 
 export interface SubscriptionSpec {
@@ -256,6 +263,16 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     console.warn("[colada-db sync] durable outbox write failed — continuing in-memory:", err);
   }
 
+  /** All engine writes ride one serialized tail (CodeRabbit round, R2):
+   *  `StorageEngine.writeBatch` guarantees atomicity per batch, never ordering
+   *  BETWEEN batches — so a fire-and-forget retire delete resolving before its
+   *  own entry's earlier put would re-create the retired row, which re-pushes
+   *  as a ghost on the next boot. */
+  let outboxWriteTail: Promise<void> = Promise.resolve();
+  function enqueueOutboxWrite(op: () => Promise<void>): void {
+    outboxWriteTail = outboxWriteTail.then(op).catch(warnOutboxPersist);
+  }
+
   function toPersisted(entry: OutboxEntry): PersistedOutboxEntry {
     return {
       mutationId: entry.mutationId,
@@ -295,21 +312,20 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
    *  watermark rides on every entry write, so it can only ever grow. */
   function persistEntry(entry: OutboxEntry): void {
     if (!outboxEngine || !outboxWritable || entry.clientId !== clientId) return;
-    outboxEngine
-      .writeBatch(
-        [
-          { key: entryKey(entry.seq), value: toPersisted(entry) },
-          { key: OUTBOX_META_KEY, value: { seq: seqCounter } },
-        ],
-        [],
-      )
-      .catch(warnOutboxPersist);
+    // Snapshot the row NOW — the tail may run later, and the entry object
+    // mutates (remap rewrites id/baseVersion, with its own re-persist).
+    const puts = [
+      { key: entryKey(entry.seq), value: toPersisted(entry) as unknown },
+      { key: OUTBOX_META_KEY, value: { seq: seqCounter } as unknown },
+    ];
+    enqueueOutboxWrite(() => outboxEngine.writeBatch(puts, []));
   }
 
   /** Delete a retired (confirmed or rejected) entry's persisted row. */
   function retireEntry(entry: OutboxEntry): void {
     if (!outboxEngine || !outboxWritable || entry.clientId !== clientId) return;
-    outboxEngine.writeBatch([], [entryKey(entry.seq)]).catch(warnOutboxPersist);
+    const key = entryKey(entry.seq);
+    enqueueOutboxWrite(() => outboxEngine.writeBatch([], [key]));
   }
 
   /** Local-mutation events observed before the durable outbox finished
@@ -374,7 +390,8 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
           // already-confirmed entry re-pushed forever is a ghost; retire it
           // now instead of restoring it.
           if ((confirmedHighWater.get(p.clientId) ?? 0) >= p.seq) {
-            engine.writeBatch([], [entryKey(p.seq)]).catch(warnOutboxPersist);
+            const key = entryKey(p.seq);
+            enqueueOutboxWrite(() => engine.writeBatch([], [key]));
             continue;
           }
           // Session floor 0 and pushed:false — see PersistedOutboxEntry.
@@ -391,7 +408,16 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       // handle stays OPEN so stop() still releases it (landing gauntlet G2:
       // flipping the open flag here leaked the handle forever).
       outboxWritable = false;
+      // CodeRabbit round R1: the watermark is unknowable, so materializing the
+      // buffer would push virgin seqs a previous session already burned — the
+      // server silently ignores seq <= lastSeen, which is finding A's exact
+      // hazard on the fault path. Suspend instead: the buffer keeps absorbing
+      // (and `getPendingCount` keeps counting), nothing pushes, the app sees
+      // why via RetryState. Recovery is a fresh enableSync() after storage
+      // heals.
+      retryState.suspendedForOutboxFault = true;
       warnOutboxPersist(err);
+      return;
     }
     if (stopped) return;
     // Flip out of buffering FIRST, then materialize — a listener firing
@@ -485,7 +511,12 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
   let pushInFlight = false; // AtMostOnePushInFlightPerClient
   let pushScheduled = false;
   let pushSuspendedForSchema = false; // D12
-  const retryState: RetryState = { attempt: 0, nextRetryAt: null, suspendedForSchema: false };
+  const retryState: RetryState = {
+    attempt: 0,
+    nextRetryAt: null,
+    suspendedForSchema: false,
+    suspendedForOutboxFault: false,
+  };
   let pushRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
   function schedulePush(delayMs = 0): void {

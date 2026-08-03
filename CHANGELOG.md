@@ -72,6 +72,18 @@ than this file's older `[feat]`/`[fix]` tags.
   ghost on the next boot; wire-protocol-v1's every-response marks make this unreachable for
   the shipped stack.
 
+  **A fourth round (CodeRabbit's PR review) added two real fixes + one policy pin (suite →
+  650):** a `loadAll` fault now SUSPENDS pushes (surfaced via
+  `RetryState.suspendedForOutboxFault`) instead of materializing buffered writes at virgin
+  seqs a previous session already burned — the server silently ignores `seq <= lastSeen`, so
+  the fault path had quietly resurrected finding A; all engine writes now ride one serialized
+  tail, because `StorageEngine.writeBatch` guarantees atomicity per batch but not ordering
+  *between* fire-and-forget batches (a fast retire delete could resurrect its own entry's
+  slower put as a ghost row); and the ack-doesn't-stamp policy under a same/concurrent
+  comparator is pinned by a test (one idempotent echo re-apply, then converged). The reload
+  tests also now use a fresh engine instance per session — the contract forbids calls after
+  `close()`.
+
 - **`restAdapter` — the first real `SyncAdapter`, and the first time Stage 3 speaks HTTP end to
   end.** `src/rest-adapter.ts` is the client half of wire protocol v1 (DAN-780): it `POST`s the
   §7 bodies to `WIRE_PULL_PATH`/`WIRE_PUSH_PATH` (cursor in the body, never the URL — §2/C5),
