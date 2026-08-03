@@ -228,10 +228,14 @@ runSyncAdapterContract({
 
 describe("coverage bookkeeping", () => {
   it("the adapter obligation list this file answers to is the kit's, verbatim", () => {
-    // Pins the intent: all 13 adapter obligations run above with zero skipped
-    // blocks, because every hook that gates a block is supplied. If the kit
-    // grows an obligation (and possibly a new hook), this count moves and this
-    // file must answer for it.
+    // Pins the intent: every hook that gates a kit block is supplied, so no
+    // block is SKIPPED. Precision owed here: 12 of the 13 obligations are
+    // exercised; LiveChannelIsOptionalPokeFirstAndLossy is satisfied by the
+    // deliberate ABSENCE of subscribe() (v1 defines no live channel), which
+    // the kit's test early-returns on rather than skips — vacuous by the
+    // property's own definition, not by a dropped hook. If the kit grows an
+    // obligation (and possibly a new hook), this count moves and this file
+    // must answer for it.
     expect(SYNC_CONTRACT_COVERAGE.adapter).toHaveLength(13);
   });
 });
@@ -328,6 +332,22 @@ describe("wire shape — §2/§7: POST, JSON, cursor in the body and never the U
     expect(calls[0]!.body.schemaVersion).toBe("4");
   });
 
+  it("a caller-supplied Content-Type overrides the default in any casing, without duplication", async () => {
+    // Headers are a case-insensitive namespace; a plain-object spread of the
+    // canonical casing over the lowercase default would send BOTH, and the
+    // fetch Headers fill algorithm joins them — strict parsers answer 415.
+    const { calls, impl } = captureFetch();
+    const adapter = restAdapter({
+      baseUrl: "https://x.test",
+      fetch: impl,
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+    });
+    await adapter.pull(null);
+    const headerKeys = Object.keys(calls[0]!.headers).filter((k) => k.toLowerCase() === "content-type");
+    expect(headerKeys).toHaveLength(1);
+    expect(calls[0]!.headers[headerKeys[0]!]).toBe("application/json; charset=utf-8");
+  });
+
   it("headers: a static record and an async callback both reach the request", async () => {
     const { calls, impl } = captureFetch();
     const staticAdapter = restAdapter({ baseUrl: "https://x.test", fetch: impl, headers: { authorization: "Bearer t1" } });
@@ -407,6 +427,19 @@ describe("malformed 200s fail loudly — never undefined into the cursor map", (
     { name: "a change missing entityType", body: { type: "changes", cursor: "c1", complete: true, changes: [{ type: "set", id: "w1", version: 1 }] }, endpoint: "pull" },
     { name: "a change missing its version token", body: { type: "changes", cursor: "c1", complete: true, changes: [{ type: "set", entityType: "Widget", id: "w1", data: {} }] }, endpoint: "pull" },
     { name: "an unknown pull result type", body: { type: "snapshot" }, endpoint: "pull" },
+    // A set with null/absent/non-object data would pass the coordinator's `else if (change.data)`
+    // falsy-skip while its version still got stamped — permanent silent divergence when the
+    // server later re-delivers the real payload at a version now classified "same".
+    { name: "a set change with null data", body: { type: "changes", cursor: "c1", complete: true, changes: [{ type: "set", entityType: "Widget", id: "w1", data: null, version: 1 }] }, endpoint: "pull" },
+    { name: "a set change with non-object data", body: { type: "changes", cursor: "c1", complete: true, changes: [{ type: "set", entityType: "Widget", id: "w1", data: "garbage", version: 1 }] }, endpoint: "pull" },
+    { name: "a set change with absent data", body: { type: "changes", cursor: "c1", complete: true, changes: [{ type: "set", entityType: "Widget", id: "w1", version: 1 }] }, endpoint: "pull" },
+    // A null seq passes `!== undefined` in the coordinator's dropConfirmed and `null >= seq`
+    // is false — the overlay is pinned forever with nothing anywhere erroring (the D1 failure
+    // mode, reachable through a value a records-only check would accept).
+    { name: "confirmedMutations with a non-numeric seq", body: { type: "changes", cursor: "c1", complete: true, changes: [], confirmedMutations: { "c-int": null } }, endpoint: "pull" },
+    // `state.cursor = result.cursor ?? null` would adopt 42 and POST a number where §7
+    // declares string-or-null — most plausibly a reset→bad-cursor→reset loop.
+    { name: "a reset with a non-string non-null cursor", body: { type: "reset", cursor: 42 }, endpoint: "pull" },
     { name: "push results not an array", body: { results: { m1: "ack" } }, endpoint: "push" },
     { name: "a verdict with an unknown status", body: { results: [{ mutationId: "m1", status: "maybe" }] }, endpoint: "push" },
   ];

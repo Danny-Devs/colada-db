@@ -24,7 +24,9 @@ than this file's older `[feat]`/`[fix]` tags.
 
   `src/rest-adapter.spec.ts` runs `runSyncAdapterContract` against the real adapter backed by a
   minimally §13-conformant in-memory stub server, with **every kit hook supplied — zero skipped
-  conformance blocks** — plus wire-mapping tests for the HTTP layer the kit cannot see, and one
+  conformance blocks** (12 of 13 obligations exercised; the live-channel one is satisfied by the
+  deliberate absence of `subscribe()`) — plus wire-mapping tests for the HTTP layer the kit
+  cannot see, and one
   integration test wiring `enableSync → restAdapter → stub server`: local write → push over
   HTTP → pull's `confirmedMutations` drops the overlay → server-seeded change applies under
   `sync-pull`. Seven mechanisms watched to fail (red-then-green, recorded on DAN-780), including
@@ -34,8 +36,13 @@ than this file's older `[feat]`/`[fix]` tags.
   surface), and per the protocol doc's §14 — updated this change — v1 therefore stays DRAFT: the
   freeze trigger is the first export/publish of the sync surface, not this in-tree landing. The
   stub server is a test fixture, not ADR-023's server conformance kit (artifact 2, still open)
-  nor its reference server (artifact 3). Suite 566 → 619 (plus `packages/mcp`'s 29, unchanged;
-  the 2 pre-existing skips are `engine-conformance.spec.ts`'s sqlite-wasm-unavailable pair).
+  nor its reference server (artifact 3). A fresh-context self-review before hand-off found four
+  real validation gaps — a set change's `data` unchecked (null data would stamp a version
+  without a write: permanent silent divergence), `confirmedMutations` values unchecked (a null
+  seq pins the overlay forever), reset's cursor unchecked, and a case-sensitive header merge
+  that duplicated `Content-Type` — all fixed with tests watched red first. Suite 566 → 625
+  (plus `packages/mcp`'s 29, unchanged; the 2 pre-existing skips are
+  `engine-conformance.spec.ts`'s sqlite-wasm-unavailable pair).
 
 - **The sync coordinator — `enableSync(store, opts)` — Stage 3 goes from a frozen contract to a
   working local-first sync loop.** `src/coordinator.ts` implements every numbered behavior in

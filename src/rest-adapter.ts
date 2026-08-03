@@ -87,14 +87,28 @@ function malformed(endpoint: string, why: string): Error {
 function toPullResult(body: unknown): PullResult {
   if (!isRecord(body)) throw malformed(WIRE_PULL_PATH, "body is not a JSON object");
 
-  if (body.type === "reset") return body as unknown as PullResult;
+  if (body.type === "reset") {
+    // §7's reset example sends `"cursor": null`; anything else non-string would
+    // be adopted by the coordinator's `result.cursor ?? null` and POSTed back
+    // into a slot the protocol declares string-or-null — a reset loop.
+    if (body.cursor != null && typeof body.cursor !== "string") {
+      throw malformed(WIRE_PULL_PATH, "a reset's cursor is neither a string nor null");
+    }
+    return body as unknown as PullResult;
+  }
 
   if (body.type === "changes") {
     if (typeof body.cursor !== "string") throw malformed(WIRE_PULL_PATH, "'changes' without a string cursor");
     if (typeof body.complete !== "boolean") throw malformed(WIRE_PULL_PATH, "'changes' without a boolean complete");
     if (!Array.isArray(body.changes)) throw malformed(WIRE_PULL_PATH, "'changes' without a changes array");
-    if (body.confirmedMutations !== undefined && !isRecord(body.confirmedMutations)) {
-      throw malformed(WIRE_PULL_PATH, "confirmedMutations is not an object");
+    if (body.confirmedMutations !== undefined) {
+      if (!isRecord(body.confirmedMutations)) throw malformed(WIRE_PULL_PATH, "confirmedMutations is not an object");
+      for (const seq of Object.values(body.confirmedMutations)) {
+        // A null/non-numeric mark passes the coordinator's `!== undefined` check
+        // while `null >= seq` is always false — the overlay would be pinned
+        // forever with nothing anywhere erroring (the silent half of D1).
+        if (typeof seq !== "number") throw malformed(WIRE_PULL_PATH, "confirmedMutations carries a non-numeric seq");
+      }
     }
     for (const change of body.changes) {
       if (!isRecord(change)) throw malformed(WIRE_PULL_PATH, "a change is not an object");
@@ -103,6 +117,14 @@ function toPullResult(body: unknown): PullResult {
       }
       if (typeof change.entityType !== "string" || typeof change.id !== "string") {
         throw malformed(WIRE_PULL_PATH, "a change is missing entityType/id");
+      }
+      // §5: data is absent for `remove` and an entity object for `set`. A falsy
+      // or non-object data on a set would slip past the coordinator's
+      // `else if (change.data)` write-skip while the version still got stamped —
+      // the re-delivered real payload then classifies "same" and is dropped
+      // forever. Silent, permanent divergence; refuse it here, loudly.
+      if (change.type === "set" && !isRecord(change.data)) {
+        throw malformed(WIRE_PULL_PATH, "a set change's data is not an entity object");
       }
       // The version stays opaque bytes (C2/§9) — this checks the JSON slot's
       // presence and primitive kind, never its format or order.
@@ -146,7 +168,14 @@ export function restAdapter(options: RestAdapterOptions): SyncAdapter {
 
   async function resolveHeaders(): Promise<Record<string, string>> {
     const custom = typeof headers === "function" ? await headers() : headers;
-    return { "content-type": "application/json", ...custom };
+    // HTTP headers are a case-insensitive namespace but a plain object is not:
+    // spreading a caller's canonical `Content-Type` over the lowercase default
+    // would keep BOTH keys, and fetch's Headers fill algorithm JOINS them into
+    // one comma-separated value — which strict body parsers refuse. Lowercase
+    // the caller's keys so an override is an override in any casing.
+    const merged: Record<string, string> = { "content-type": "application/json" };
+    for (const [key, value] of Object.entries(custom ?? {})) merged[key.toLowerCase()] = value;
+    return merged;
   }
 
   /** One exchange: POST JSON, classify the status (§8), return the parsed body
