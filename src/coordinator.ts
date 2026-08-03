@@ -200,16 +200,26 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
   // without any store write, and a gate on the version map falsely suppressed a legitimate
   // same-key revert (round-2 review gauntlet, DAN-776).
   const serverWriteGen = new Map<EntityKeyStr, number>();
-  // What that last authoritative write held (`data: undefined` = an authoritative remove).
-  // The reject path re-bases onto THIS when the entry's commit-time `previousData` has been
-  // superseded — merely declining to revert is not enough, because a transform's sibling
-  // replay may have baked the about-to-be-rejected edit on top of the correction, and the
-  // server's echo classifies "same" and cannot heal it (round-3 review gauntlet).
+  // The server SHADOW — cumulative best-known server state per key (`data: undefined` = an
+  // authoritative remove). The reject path re-bases onto THIS when the entry's commit-time
+  // `previousData` has been superseded — merely declining to revert is not enough, because a
+  // transform's sibling replay may have baked the about-to-be-rejected edit on top of the
+  // correction, and the server's echo classifies "same" and cannot heal it (round-3 gauntlet).
+  //
+  // Maintained patch-over-patch, NOT as the last raw payload: pull `set` payloads are partial
+  // patches that the apply path MERGES (store.set — the documented enrichment semantics), so
+  // caching a raw patch and re-applying it as a full replacement drops every field the patch
+  // didn't carry (round-4 gauntlet). And never captured from post-apply `store.get()`, which
+  // would bake unconfirmed pending local edits into "server truth."
   const serverTruth = new Map<EntityKeyStr, { data?: EntityRecord }>();
 
-  function recordServerWrite(k: EntityKeyStr, data: EntityRecord | undefined): void {
+  function recordServerWrite(k: EntityKeyStr, data: EntityRecord | undefined, mode: "merge" | "replace"): void {
     serverWriteGen.set(k, (serverWriteGen.get(k) ?? 0) + 1);
-    serverTruth.set(k, { data });
+    if (data === undefined) serverTruth.set(k, { data: undefined });
+    else if (mode === "merge") {
+      const prev = serverTruth.get(k)?.data;
+      serverTruth.set(k, { data: { ...prev, ...data } });
+    } else serverTruth.set(k, { data });
   }
 
   function isLocalType(entityType: string): boolean {
@@ -341,7 +351,9 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
           // An authoritative store write outside applyRemoteChange — the reject gate must see
           // it, or a same-key reject reverts commit-time previousData over the server's
           // correction and the "same"-classified echo never heals it (round-3 gauntlet).
-          recordServerWrite(toKey(entry.entityType, targetId), verdict.data);
+          // "replace": a transform verdict carries the full corrected entity, not a patch
+          // (it is applied with applyReplaceOrRemove → store.replace above, same semantics).
+          recordServerWrite(toKey(entry.entityType, targetId), verdict.data, "replace");
         }
         if (verdict.remappedId && verdict.remappedId !== entry.id) {
           store.remove(entry.entityType, entry.id); // "one move event" — see ADR implementation note part 2
@@ -445,8 +457,9 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       else if (change.data) store.set(change.entityType, change.id, change.data);
     });
     versions.set(k, change.version);
-    // The revert gate counts WRITES, not stamps — and caches what the write held.
-    recordServerWrite(k, change.type === "remove" ? undefined : change.data);
+    // The revert gate counts WRITES, not stamps — and the shadow accumulates what they held.
+    // "merge" mirrors the store.set above: a pull payload is a patch, not a whole entity.
+    recordServerWrite(k, change.type === "remove" ? undefined : change.data, "merge");
   }
 
   function dropConfirmed(confirmedMutations: Record<string, number> | undefined): void {

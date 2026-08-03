@@ -852,6 +852,55 @@ describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => 
     expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "TODAY" });
   });
 
+  it("re-basing after a partial remote change preserves fields the patch did not carry", async () => {
+    // Round-4 gauntlet finding: the apply path merges partial remote payloads (store.set,
+    // the documented enrichment semantics), but a cache of the raw patch re-applied as a
+    // full replacement drops every field the patch didn't carry — echo-immune, since the
+    // patch's version is already stamped. The cache must be a server SHADOW maintained
+    // patch-over-patch, mirroring the merge the store itself performs.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePull(
+      {
+        type: "changes",
+        changes: [remoteChange({ data: { id: "w1", label: "A", color: "red" }, version: 1 })],
+        cursor: "1",
+        complete: true,
+      },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "A", color: "red" });
+
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ results: batch.map((c) => ({ mutationId: c.mutationId, status: "reject" as const })) });
+        }),
+    );
+    localWrite(store, "Widget", "w1", { id: "w1", label: "B", color: "red" });
+    await tick();
+
+    // Mid-flight PARTIAL remote change — carries label only; the merge keeps color.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "C" }, version: 5 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C", color: "red" });
+
+    release();
+    await tick();
+    // The re-base must restore the server's cumulative state, not the last patch alone.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C", color: "red" });
+  });
+
   it("still reverts normally when no remote change landed mid-flight", async () => {
     // The gate must not break the ordinary reject path: basis unchanged ⇒ revert happens.
     const store = freshStore();

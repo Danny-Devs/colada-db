@@ -61,9 +61,13 @@ than this file's older `[feat]`/`[fix]` tags.
   the pull path, and that merely *declining* to revert is insufficient anyway once the
   transform's sibling replay has baked the about-to-be-rejected edit on top of the correction.
   The landed design: a per-key **server-write generation counter** (pull-applies + transform
-  data-applies, never ack stamps) plus a **last-server-applied value cache** — an unchanged
-  generation reverts to commit-time `previousData`; a changed one **re-bases onto the cached
-  server truth**. Adopted (sibling-recovered) entries take the session-floor generation 0 rather
+  data-applies, never ack stamps) plus a **server shadow** — an unchanged generation reverts to
+  commit-time `previousData`; a changed one **re-bases onto the shadow**. The shadow is
+  maintained patch-over-patch (round 4's finding: pull payloads are partial patches the apply
+  path *merges*, so caching a raw patch and re-applying it as a replacement drops every field
+  the patch didn't carry — and post-apply `store.get()` is not the answer either, since that
+  would bake unconfirmed pending local edits into "server truth"). Adopted (sibling-recovered)
+  entries take the session-floor generation 0 rather
   than adoption-time capture, which races the boot pull — their `previousData` is from a
   previous session by construction, so any server write this session supersedes it. Every
   scenario above is a named test, each watched to fail against the code that preceded it; the
@@ -78,7 +82,7 @@ than this file's older `[feat]`/`[fix]` tags.
   permanently suspend the outbox on a retryable blip — now name-based. The review also replaced a
   test that asserted nothing (boot, zero writes, expect zero pushes — green against any
   implementation) with one that falsifies the deny-list origin filter (`origin !== "sync-pull"`),
-  verified red against exactly that mutant. Suite 557 → 565.
+  verified red against exactly that mutant. Suite 557 → 566.
 
 - **Pagination is tested. It shipped in `0.1.0` untested, and nobody could tell.**
   `cursorPagination`, `offsetPagination` and `relayPagination` have been exported
