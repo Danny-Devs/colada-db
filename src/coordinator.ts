@@ -41,6 +41,10 @@ interface OutboxEntry {
   id: string;
   data?: EntityRecord;
   baseVersion?: SyncVersion;
+  /** How many pull-channel store writes this key had seen when this entry captured
+   *  `previousData` — the revert gate compares against the live counter, never the version
+   *  map (an ack advances versions WITHOUT writing the store). See `revertAndReplay`. */
+  basePullGen: number;
   intent?: { name: string; args: unknown };
   /** rev d / D4 — minted at commit time (outbox-entry-creation time here), never at push time. */
   auth?: unknown;
@@ -188,6 +192,13 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
   // baseVersion reads from. Absent key = no baseVersion, never 0.
   const versions = new Map<EntityKeyStr, SyncVersion>();
 
+  // Monotonic per-key counter of authoritative PULL-CHANNEL store writes (bumped only when
+  // `applyRemoteChange` actually writes). The reject-revert gate reads THIS, not `versions`:
+  // ack/transform verdicts stamp a version into `versions` without any pull-side store write,
+  // and a gate on the version map would let a same-key ack falsely suppress a legitimate
+  // revert (round-2 review gauntlet, DAN-776).
+  const pullApplied = new Map<EntityKeyStr, number>();
+
   function isLocalType(entityType: string): boolean {
     return entityDefs[entityType]?.local === true;
   }
@@ -216,6 +227,7 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       id: event.id,
       data: event.type === "set" ? event.data : undefined,
       baseVersion: versions.get(k),
+      basePullGen: pullApplied.get(k) ?? 0,
       auth: mintAuth?.(),
       previousData: event.previousData,
       previousExisted: event.previousData !== undefined,
@@ -264,20 +276,18 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
    *  still-outstanding entry for the same key, in outbox order, so a second in-flight writer's
    *  edit is never silently erased by the first writer's rejection.
    *
-   *  The revert is VERSION-GATED (review gauntlet, DAN-776): commit-time `previousData` is only
-   *  authoritative while the store's remote basis for this key is still the entry's own
-   *  `baseVersion`. If a pull advanced it while the push was in flight, the store already holds
-   *  newer server truth — reverting over it diverges from the server PERMANENTLY, because
-   *  `versions` keeps the newer stamp, so a re-pull of that same version classifies as "same"
-   *  and is skipped. Sibling replay still runs either way. */
+   *  The revert is GATED ON PULL-WRITE GENERATION (review gauntlet, DAN-776, both rounds):
+   *  commit-time `previousData` is only authoritative while no pull-channel write has landed on
+   *  this key since the entry captured it. If one has, the store holds newer server truth —
+   *  reverting over it diverges PERMANENTLY, because `versions` keeps the newer stamp, so the
+   *  re-pull of that same version classifies as "same" and is skipped. The gate deliberately
+   *  does NOT read `versions`: an ack stamps a version there with no store write, and gating on
+   *  it falsely suppressed the revert of a rejected same-key sibling (round-2 finding).
+   *  Sibling replay still runs either way. */
   function revertAndReplay(rejected: OutboxEntry): void {
     store.runWith({ origin: "undo" as WriteOrigin, transactionId: rejected.transactionId }, () => {
-      const known = versions.get(toKey(rejected.entityType, rejected.id));
-      const basisUnchanged =
-        known === undefined
-          ? rejected.baseVersion === undefined
-          : rejected.baseVersion !== undefined && compareVersions(known, rejected.baseVersion) === "same";
-      if (basisUnchanged) {
+      const gen = pullApplied.get(toKey(rejected.entityType, rejected.id)) ?? 0;
+      if (gen === rejected.basePullGen) {
         if (rejected.previousExisted) applyReplaceOrRemove(rejected.entityType, rejected.id, rejected.previousData);
         else store.remove(rejected.entityType, rejected.id);
       }
@@ -410,6 +420,7 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       else if (change.data) store.set(change.entityType, change.id, change.data);
     });
     versions.set(k, change.version);
+    pullApplied.set(k, (pullApplied.get(k) ?? 0) + 1); // the revert gate counts WRITES, not stamps
   }
 
   function dropConfirmed(confirmedMutations: Record<string, number> | undefined): void {
@@ -538,7 +549,12 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         // previousData/previousExisted come from the sibling's own commit-time capture when
         // supplied — NOT hardcoded to "didn't exist", which would make a reject of a relayed
         // update always delete the entity instead of reverting it.
-        outbox.push({ ...s, previousExisted: s.previousExisted ?? false, pushed: false });
+        outbox.push({
+          ...s,
+          previousExisted: s.previousExisted ?? false,
+          basePullGen: pullApplied.get(toKey(s.entityType, s.id)) ?? 0, // adoption-time basis
+          pushed: false,
+        });
       }
       if (stranded.length > 0) schedulePush();
     });

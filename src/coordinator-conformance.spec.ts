@@ -744,6 +744,39 @@ describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => 
     expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C" });
   });
 
+  it("a same-key ack does not suppress the revert of a rejected sibling", async () => {
+    // Round-2 gauntlet finding: an ack advances `versions` WITHOUT writing the store, so a
+    // gate that reads the version map conflates "stamp advanced" with "content changed" and
+    // leaves the rejected data in place forever (the echo pull classifies "same" and skips).
+    // The gate must count actual pull-channel store writes, not version stamps.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePush((batch) => ({
+      results: batch.map((c, i) =>
+        i === 0
+          ? { mutationId: c.mutationId, status: "ack" as const, version: 7 }
+          : { mutationId: c.mutationId, status: "reject" as const },
+      ),
+    }));
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    // Two writes to the same key land in ONE push batch: X (acked @v7), then B (rejected).
+    localWrite(store, "Widget", "w1", { id: "w1", label: "X" });
+    localWrite(store, "Widget", "w1", { id: "w1", label: "B" });
+    await tick();
+    // The store's content basis never changed — the reject must still revert B to X.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "X" });
+    // And the server's echo of X@v7 leaves the converged value in place.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "X" }, version: 7 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "X" });
+  });
+
   it("still reverts normally when no remote change landed mid-flight", async () => {
     // The gate must not break the ordinary reject path: basis unchanged ⇒ revert happens.
     const store = freshStore();
