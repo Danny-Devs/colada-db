@@ -1,7 +1,7 @@
 # ADR-023: The sync wire protocol is a first-class artifact, versioned in the path
 
 **Status:** Accepted
-**Implementation:** in-progress
+**Implementation:** in-progress (artifact 1, the protocol doc, shipped 2026-08-02 with `src/wire-protocol.ts`; the protocol's client half is now exercised end-to-end by `restAdapter` (DAN-780) against a §13-conformant stub — v1 still DRAFT per §14, freeze deferred to the sync surface's first export/publish; artifacts 2 (server conformance kit) and 3 (reference server) remain open)
 **Force:** invariant
 **Date:** 2026-08-02
 **Relates to:** ADR-006 (the SyncAdapter interface), ADR-021 (CI is the gate of record), ADR-022 (the irreversibility lines — this ADR is about **line 5**)
