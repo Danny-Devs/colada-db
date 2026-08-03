@@ -10,6 +10,37 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **The durable outbox (ADR-006 §1) and the pull-apply sibling replay — the two deliberate
+  deferrals from DAN-776's landing review, closed (DAN-777).**
+
+  **Finding A — the durable outbox.** `EnableSyncOptions.outboxEngine?: StorageEngine` takes a
+  SEPARATE engine instance (its own file/store, e.g. `idbEngine({ dbName: "cdb_outbox" })` —
+  §1's requirement that a state reset can never destroy unpushed writes). Outbox entries and a
+  per-client `seq` watermark are persisted at commit time and restored on boot: pending pushes
+  survive reloads and are relayed with identical `mutationId`/`seq` (never re-authored), and
+  `seq` never regresses — the watermark is its own row rather than derived from surviving
+  entries, because confirmed entries are deleted and re-issuing their seqs would be silently
+  ignored server-side (the exact post-reload write-loss hazard finding A names). Writes racing
+  the async boot-load are buffered with everything captured at commit time (mutationId, auth,
+  previousData — D4's law) except `seq`, which waits for the restored watermark. Persistence
+  failures degrade gracefully to in-memory with one warning. Without `outboxEngine` the old
+  behavior stands and is now loudly documented on `clientId` (a stable clientId requires the
+  durable outbox) — and pinned by a test.
+
+  **Finding B — pull-apply replays still-pending same-key writers**, completing the trio:
+  `reject` and `transform` already replayed; a pull-applied remote change now does too, inside
+  the same `sync-pull` write channel (no echo, no new outbox entries). Pending optimistic edits
+  no longer visibly vanish until the push echo returns. Two pre-existing tests pinned the old
+  vanishing behavior mid-flight and were updated to pin the new one — their final
+  divergence-prevention assertions are unchanged. Related, same family: `ack`/`transform`
+  version stamps now route through a guarded stamp that never regresses a newer pull's stamp
+  (push and pull overlap by design, D17 — an unconditional stamp let a late verdict's older
+  version misclassify the next pull as "older"/"same").
+
+  Six mechanisms watched to fail (mutation → named test red → revert): the pull-apply replay,
+  both guarded stamps, watermark restore, entry persistence, and the pre-boot buffer. Suite
+  630 → 637.
+
 - **`restAdapter` — the first real `SyncAdapter`, and the first time Stage 3 speaks HTTP end to
   end.** `src/rest-adapter.ts` is the client half of wire protocol v1 (DAN-780): it `POST`s the
   §7 bodies to `WIRE_PULL_PATH`/`WIRE_PUSH_PATH` (cursor in the body, never the URL — §2/C5),

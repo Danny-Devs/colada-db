@@ -28,7 +28,7 @@ import {
 } from "./coordinator-conformance";
 import { SYNC_CONTRACT_COVERAGE } from "./sync-conformance";
 import type { SyncAdapter } from "./sync-types";
-import type { EntityStore } from "./types";
+import type { EntityKey, EntityStore, StorageEngine } from "./types";
 
 function localWrite(
   store: EntityStore,
@@ -736,7 +736,11 @@ describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => 
     });
     scripted.emitLive({ type: "poke" });
     await tick();
-    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C" });
+    // DAN-777 finding B: the pull-apply replays the still-pending writer on
+    // top (C landed underneath, B stays visible) — before that fix this line
+    // pinned {label: "C"}, i.e. the optimistic edit visibly vanishing until
+    // the push echo returned.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "B" });
 
     release();
     await tick();
@@ -893,7 +897,10 @@ describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => 
     });
     scripted.emitLive({ type: "poke" });
     await tick();
-    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C", color: "red" });
+    // DAN-777 finding B: the pending writer (B) is replayed over the merged
+    // partial apply, so the merge's effect on the SHADOW is what the final
+    // assertion below proves — the store mid-flight shows the optimistic edit.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "B", color: "red" });
 
     release();
     await tick();
@@ -994,5 +1001,245 @@ describe("SchemaVersionError detection is name-based, never message-text matchin
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAN-777 — the two deliberate deferrals from DAN-776's landing review
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** An in-memory StorageEngine over a caller-visible Map, so tests can seed a
+ *  previous session's rows and inspect what the coordinator persisted. The
+ *  Map OUTLIVES enableSync instances — that persistence across "reloads" is
+ *  the entire subject under test. */
+function fakeOutboxEngine(rows: Map<string, unknown> = new Map(), opts: { openDelayMs?: number } = {}) {
+  const engine: StorageEngine = {
+    isSupported: () => true,
+    async open() {
+      if (opts.openDelayMs) await new Promise((r) => setTimeout(r, opts.openDelayMs));
+    },
+    async loadAll() {
+      return [...rows.entries()].map(([key, data]) => ({ key: key as EntityKey, data }));
+    },
+    async loadMany(keys) {
+      return keys.filter((k) => rows.has(k)).map((k) => ({ key: k, data: rows.get(k) }));
+    },
+    async writeBatch(puts, deletes) {
+      for (const p of puts) rows.set(p.key, p.value);
+      for (const d of deletes) rows.delete(d);
+    },
+    close() {},
+  };
+  return { engine, rows };
+}
+
+describe("DAN-777 finding B — pull-apply replays still-pending same-key writers", () => {
+  it("replays multiple pending writers in outbox order, and none re-enter the outbox", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePush(() => new Promise<never>(() => {})); // verdicts never arrive — both writers stay pending
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "one" });
+    localWrite(store, "Widget", "w1", { id: "w1", label: "two" });
+    await tick();
+    expect(handle.getPendingCount()).toBe(2);
+    const pushCallsBefore = scripted.pushCalls.length;
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SERVER" }, version: 5 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+
+    // Outbox order: "one" then "two" replayed over the applied SERVER value.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "two" });
+    // The replay ran under the pull's own write channel — no echo, no new entries.
+    expect(handle.getPendingCount()).toBe(2);
+    expect(scripted.pushCalls.length).toBe(pushCallsBefore);
+  });
+
+  it("a transform verdict's version stamp never regresses a newer pull's stamp", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              results: [
+                { mutationId: batch[0]!.mutationId, status: "transform" as const, data: { id: "w1", label: "TRANSFORMED" }, version: 5 },
+              ],
+            });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "LOCAL" });
+    await tick(); // push in flight, verdict held
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "TEN" }, version: 10 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(); // v10 stamped mid-flight
+
+    release();
+    await tick(); // transform applies its data (D2), but must NOT stamp v5 over v10
+
+    // The discriminating probe: a later v7 change. Guarded stamp → known is
+    // still 10 → v7 classifies "older" and is skipped. A regressed stamp (5)
+    // would classify v7 "newer" and apply it.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SEVEN" }, version: 7 })],
+      cursor: "3",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "TRANSFORMED" });
+  });
+
+  it("an ack verdict's version stamp never regresses a newer pull's stamp", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () => resolve({ results: [{ mutationId: batch[0]!.mutationId, status: "ack" as const, version: 5 }] });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "LOCAL" });
+    await tick(); // in flight
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "TEN" }, version: 10 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(); // v10 applied and stamped; the pending LOCAL replayed on top
+
+    release();
+    await tick(); // ack v5 — stamp must keep 10
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SEVEN" }, version: 7 })],
+      cursor: "3",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    // Guarded stamp: v7 skipped, the replayed LOCAL edit stays. Regressed
+    // stamp: v7 applies (the acked entry is pushed, so nothing replays over it).
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "LOCAL" });
+  });
+});
+
+describe("DAN-777 finding A — the durable outbox (ADR-006 §1)", () => {
+  it("seq resumes from the persisted watermark after confirmation and reload — post-reload writes are not silently ignored", async () => {
+    const { engine, rows } = fakeOutboxEngine();
+
+    // Session 1: write, push (seq 1), confirm via the pull channel, stop.
+    const store1 = freshStore();
+    const s1 = makeScriptedAdapter();
+    const h1 = boot(store1, { adapter: s1.adapter, clientId: "stable-client", outboxEngine: engine });
+    await tick(5);
+    localWrite(store1, "Widget", "w1", { id: "w1", label: "first" });
+    await tick();
+    expect(s1.pushCalls[0]![0]!.seq).toBe(1);
+    s1.queuePull({ type: "changes", changes: [], cursor: "2", complete: true, confirmedMutations: { "stable-client": 1 } });
+    s1.emitLive({ type: "poke" });
+    await tick();
+    expect(h1.getPendingCount()).toBe(0);
+    h1.stop();
+
+    // The confirmed entry's row is deleted; the watermark row is NOT derived
+    // from surviving entries, so it must still say 1.
+    expect([...rows.keys()].filter((k) => k.startsWith("outbox-entry:"))).toEqual([]);
+    expect(rows.get("outbox-meta:seq")).toEqual({ seq: 1 });
+
+    // Session 2, same clientId + same store: the next write must be seq 2 —
+    // seq 1 would be <= the server's lastSeen and silently ignored forever.
+    const store2 = freshStore();
+    const s2 = makeScriptedAdapter();
+    boot(store2, { adapter: s2.adapter, clientId: "stable-client", outboxEngine: engine });
+    await tick(5);
+    localWrite(store2, "Widget", "w2", { id: "w2", label: "after reload" });
+    await tick();
+    expect(s2.pushCalls[0]![0]!.seq).toBe(2);
+  });
+
+  it("a pending (unconfirmed) entry survives reload and is re-pushed with identical identity — relay, never re-authorship", async () => {
+    const { engine } = fakeOutboxEngine();
+
+    const store1 = freshStore();
+    const s1 = makeScriptedAdapter();
+    s1.queuePush(() => new Promise<never>(() => {})); // the verdict never arrives this session
+    const h1 = boot(store1, { adapter: s1.adapter, clientId: "c-durable", outboxEngine: engine });
+    await tick(5);
+    localWrite(store1, "Widget", "w1", { id: "w1", label: "pending across reload" });
+    await tick();
+    const sent = s1.pushCalls[0]![0]!;
+    h1.stop();
+
+    const store2 = freshStore();
+    const s2 = makeScriptedAdapter();
+    boot(store2, { adapter: s2.adapter, clientId: "c-durable", outboxEngine: engine });
+    await tick(5);
+    const resent = s2.pushCalls.flat();
+    expect(resent).toHaveLength(1);
+    // Same mutationId and seq — the server dedups replays by exactly these.
+    expect(resent[0]!.mutationId).toBe(sent.mutationId);
+    expect(resent[0]!.seq).toBe(sent.seq);
+    expect(resent[0]!.data).toEqual(sent.data);
+  });
+
+  it("a write arriving before the durable-outbox load completes waits for the restored watermark", async () => {
+    // A previous session left the watermark at 7. The engine opens slowly;
+    // the app writes immediately. Without pre-boot buffering the write would
+    // take seq 1 and collide with the previous session's numbering.
+    const rows = new Map<string, unknown>([["outbox-meta:seq", { seq: 7 }]]);
+    const { engine } = fakeOutboxEngine(rows, { openDelayMs: 15 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-early", outboxEngine: engine });
+    localWrite(store, "Widget", "w1", { id: "w1", label: "raced the boot" });
+    await tick(40);
+    expect(scripted.pushCalls[0]![0]!.seq).toBe(8);
+  });
+
+  it("without an outboxEngine, seq restarts at 1 per instance — the documented constraint on reusing a clientId", async () => {
+    // This pins the DOCUMENTED in-memory behavior (EnableSyncOptions.clientId
+    // doc): a stable clientId without a durable outbox means post-reload
+    // writes are seq <= lastSeen server-side. The fix for that hazard is
+    // outboxEngine, not a change to this behavior.
+    const store1 = freshStore();
+    const s1 = makeScriptedAdapter();
+    const h1 = boot(store1, { adapter: s1.adapter, clientId: "stable-client" });
+    localWrite(store1, "Widget", "w1", { id: "w1" });
+    await tick();
+    expect(s1.pushCalls[0]![0]!.seq).toBe(1);
+    h1.stop();
+
+    const store2 = freshStore();
+    const s2 = makeScriptedAdapter();
+    boot(store2, { adapter: s2.adapter, clientId: "stable-client" });
+    localWrite(store2, "Widget", "w2", { id: "w2" });
+    await tick();
+    expect(s2.pushCalls[0]![0]!.seq).toBe(1);
   });
 });

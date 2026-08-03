@@ -13,7 +13,7 @@
  * `sync-types.ts` / `sync-conformance.ts`). Promoting this to a published
  * entry point is a separate, later, deliberate act.
  */
-import type { EntityDefinition, EntityEvent, EntityRecord, EntityStore, WriteOrigin } from "./types";
+import type { EntityDefinition, EntityEvent, EntityRecord, EntityStore, StorageEngine, WriteOrigin } from "./types";
 import { defaultCompareVersions } from "./sync-types";
 import type { LocalChange, PullResult, PushVerdict, RemoteChange, SyncAdapter, SyncVersion } from "./sync-types";
 
@@ -97,8 +97,34 @@ export interface SubscriptionSpec {
 
 export interface EnableSyncOptions {
   adapter: SyncAdapter;
-  /** Opaque per rev c C3 — never parsed, validated, or format-checked here. */
+  /**
+   * Opaque per rev c C3 — never parsed, validated, or format-checked here.
+   *
+   * ⚠️ **Without `outboxEngine`, a `clientId` must be fresh per coordinator
+   * instance.** The in-memory outbox restarts `seq` at 1 on every
+   * `enableSync()`, and the wire contract has the server ignore
+   * `seq <= lastSeen` — so reusing a stable `clientId` across reloads makes
+   * the server silently ignore EVERY post-reload write (DAN-777 finding A).
+   * Supply `outboxEngine` to get the ADR-006 §1 durable outbox, which is what
+   * makes a stable `clientId` safe.
+   */
   clientId: string;
+  /**
+   * ADR-006 §1 — the durable outbox. A SEPARATE StorageEngine instance (its
+   * own file/store — e.g. `idbEngine({ dbName: "cdb_outbox" })`), never the
+   * entity store's engine: §1 requires that a state reset can never destroy
+   * unpushed writes. When supplied, outbox entries and the per-client `seq`
+   * watermark are persisted at commit time and restored on boot, so pending
+   * pushes survive reloads and `seq` never regresses (the watermark is its
+   * own row rather than derived from surviving entries — confirmed entries
+   * are deleted, and re-issuing their seqs would be silently ignored
+   * server-side). One coordinator instance per `clientId` per outbox store;
+   * sibling tabs recover each other via `recoverStrandedOutbox`, not by
+   * sharing one live store. Persistence failures degrade gracefully to
+   * in-memory operation with a console warning — a storage fault must not
+   * block local writes.
+   */
+  outboxEngine?: StorageEngine;
   /** Same shape `normalize.ts` already takes — there is no global entity-definition registry. */
   entityDefs?: Record<string, EntityDefinition>;
   subscriptions?: SubscriptionSpec[];
@@ -173,6 +199,7 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     pullLimit,
     mintAuth,
     recoverStrandedOutbox,
+    outboxEngine,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   } = opts;
   const subscriptions: SubscriptionSpec[] = opts.subscriptions?.length ? opts.subscriptions : [{}];
@@ -187,6 +214,140 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
   const outbox: OutboxEntry[] = [];
   let seqCounter = 0;
   const nextSeq = (): number => (seqCounter += 1);
+
+  // ── ADR-006 §1 — the durable outbox (DAN-777 finding A) ─────────────────
+  // Row layout in the caller-supplied SEPARATE engine: one meta row holding
+  // the seq watermark, one row per still-pending OWN-client entry. Adopted
+  // sibling entries are never persisted here — they belong to the recovery
+  // source that supplied them and are re-supplied on the next boot.
+  const OUTBOX_META_KEY = "outbox-meta:seq" as const;
+  const entryKey = (seq: number): `outbox-entry:${number}` => `outbox-entry:${seq}`;
+
+  /** The commit-time facts a reload must restore. `baseServerGen` and `pushed`
+   *  are deliberately NOT persisted: server-write generations are
+   *  session-scoped (a restored entry takes the session floor 0, the same
+   *  reasoning as adoption — its `previousData` is from a previous session by
+   *  construction), and a pushed-but-unconfirmed entry is safely re-pushed
+   *  because the server dedups by `mutationId`. */
+  interface PersistedOutboxEntry {
+    mutationId: string;
+    clientId: string;
+    seq: number;
+    transactionId?: string;
+    op: "set" | "remove";
+    entityType: string;
+    id: string;
+    data?: EntityRecord;
+    baseVersion?: SyncVersion;
+    intent?: { name: string; args: unknown };
+    auth?: unknown;
+    previousData?: EntityRecord;
+    previousExisted: boolean;
+  }
+
+  let outboxPersistWarned = false;
+  function warnOutboxPersist(err: unknown): void {
+    if (outboxPersistWarned) return;
+    outboxPersistWarned = true;
+    console.warn("[colada-db sync] durable outbox write failed — continuing in-memory:", err);
+  }
+
+  function toPersisted(entry: OutboxEntry): PersistedOutboxEntry {
+    return {
+      mutationId: entry.mutationId,
+      clientId: entry.clientId,
+      seq: entry.seq,
+      transactionId: entry.transactionId,
+      op: entry.op,
+      entityType: entry.entityType,
+      id: entry.id,
+      data: entry.data,
+      baseVersion: entry.baseVersion,
+      intent: entry.intent,
+      auth: entry.auth,
+      previousData: entry.previousData,
+      previousExisted: entry.previousExisted,
+    };
+  }
+
+  let outboxEngineOpened = false;
+
+  /** Persist one own-client entry plus the seq watermark, best-effort. The
+   *  watermark rides on every entry write, so it can only ever grow. */
+  function persistEntry(entry: OutboxEntry): void {
+    if (!outboxEngine || !outboxEngineOpened || entry.clientId !== clientId) return;
+    outboxEngine
+      .writeBatch(
+        [
+          { key: entryKey(entry.seq), value: toPersisted(entry) },
+          { key: OUTBOX_META_KEY, value: { seq: seqCounter } },
+        ],
+        [],
+      )
+      .catch(warnOutboxPersist);
+  }
+
+  /** Delete a retired (confirmed or rejected) entry's persisted row. */
+  function retireEntry(entry: OutboxEntry): void {
+    if (!outboxEngine || !outboxEngineOpened || entry.clientId !== clientId) return;
+    outboxEngine.writeBatch([], [entryKey(entry.seq)]).catch(warnOutboxPersist);
+  }
+
+  /** Local-mutation events observed before the durable outbox finished
+   *  loading. Everything commit-time is already captured (mutationId, auth,
+   *  previousData — D4's mint-at-commit law); only `seq` waits, because it
+   *  must be allocated AFTER the restored watermark or a fast first write
+   *  collides with a previous session's numbering. `null` = no buffering
+   *  (no engine, or boot complete). */
+  let preBootBuffer: Array<Omit<OutboxEntry, "seq">> | null = outboxEngine ? [] : null;
+
+  function materializeEntry(captured: Omit<OutboxEntry, "seq">): void {
+    const entry: OutboxEntry = { ...captured, seq: nextSeq() };
+    outbox.push(entry);
+    persistEntry(entry);
+  }
+
+  async function bootDurableOutbox(engine: StorageEngine): Promise<void> {
+    try {
+      if (engine.isSupported()) {
+        await engine.open();
+        outboxEngineOpened = true;
+        if (!stopped) {
+          const rows = await engine.loadAll();
+          if (!stopped) {
+            let watermark = 0;
+            const restored: PersistedOutboxEntry[] = [];
+            for (const row of rows) {
+              if (row.key === OUTBOX_META_KEY) {
+                const seq = (row.data as { seq?: unknown } | undefined)?.seq;
+                if (typeof seq === "number") watermark = Math.max(watermark, seq);
+              } else if (row.key.startsWith("outbox-entry:")) {
+                restored.push(row.data as PersistedOutboxEntry);
+              }
+            }
+            restored.sort((a, b) => a.seq - b.seq);
+            for (const p of restored) {
+              // Session floor 0 and pushed:false — see PersistedOutboxEntry.
+              outbox.push({ ...p, baseServerGen: 0, pushed: false });
+              watermark = Math.max(watermark, p.seq);
+            }
+            seqCounter = Math.max(seqCounter, watermark);
+          }
+        }
+      } else {
+        console.warn("[colada-db sync] outboxEngine.isSupported() is false — outbox is in-memory this session");
+      }
+    } catch (err) {
+      warnOutboxPersist(err);
+    }
+    if (stopped) return;
+    // Flip out of buffering FIRST, then materialize — a listener firing
+    // mid-loop must take the normal path, not append behind our back.
+    const buffered = preBootBuffer ?? [];
+    preBootBuffer = null;
+    for (const captured of buffered) materializeEntry(captured);
+    if (outbox.some((e) => !e.pushed)) schedulePush();
+  }
 
   // The coordinator's own record of "what did a sync-pull apply last stamp
   // here" — EntityEvent.version is never populated by the in-memory store
@@ -240,10 +401,13 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     if (event.type !== "set" && event.type !== "remove") return;
 
     const k = toKey(event.entityType, event.id);
-    const entry: OutboxEntry = {
+    // Everything here is commit-time capture (D4: auth is minted NOW, never at
+    // push time) — except `seq`, which the durable-outbox boot may still owe a
+    // restored watermark for. Buffered events are materialized in arrival
+    // order once the watermark is known.
+    const captured: Omit<OutboxEntry, "seq"> = {
       mutationId: makeMutationId(clientId),
       clientId,
-      seq: nextSeq(),
       transactionId: event.transactionId,
       op: event.type,
       entityType: event.entityType,
@@ -256,7 +420,11 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       previousExisted: event.previousData !== undefined,
       pushed: false,
     };
-    outbox.push(entry);
+    if (preBootBuffer) {
+      preBootBuffer.push(captured);
+      return;
+    }
+    materializeEntry(captured);
     schedulePush();
   });
 
@@ -284,10 +452,10 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
    *  still-unconfirmed writer's edit to the same key" (ADR-006 implementation note, part 2). Must
    *  run inside the caller's own `runWith`, so the replayed writes share its origin/transactionId.
    */
-  function replaySiblings(entityType: string, id: string, exclude: OutboxEntry): void {
+  function replaySiblings(entityType: string, id: string, exclude: OutboxEntry | null): void {
     const k = toKey(entityType, id);
     for (const other of outbox) {
-      if (other === exclude) continue;
+      if (exclude !== null && other === exclude) continue;
       if (other.pushed) continue; // already server-accepted; not ours to replay over
       if (toKey(other.entityType, other.id) !== k) continue;
       if (other.op === "set" && other.data) store.set(other.entityType, other.id, other.data);
@@ -330,8 +498,27 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       if (entry.entityType === entityType && entry.id === oldId) {
         entry.id = newId;
         entry.baseVersion = undefined;
+        // The persisted row must match what a reload would need to re-push —
+        // an entry restored under the old id would ship a temp id the server
+        // no longer knows.
+        persistEntry(entry);
       }
     }
+  }
+
+  /**
+   * Stamp a version only when it ADVANCES the entity's last-known one
+   * (DAN-777 finding B, the related case): a push verdict's version can
+   * arrive after a pull already stamped something newer for the same key —
+   * push and pull overlap by design (D17) — and an unconditional stamp
+   * regresses the map, misclassifying the next pull as "same"/"older".
+   * `applyRemoteChange` keeps its own direct set: its gate has already
+   * decided the change applies (including "concurrent", where the stamp must
+   * follow the applied data even though the comparator refuses to rank it).
+   */
+  function stampVersionIfNewer(k: EntityKeyStr, version: SyncVersion): void {
+    const known = versions.get(k);
+    if (known === undefined || compareVersions(version, known) === "newer") versions.set(k, version);
   }
 
   function handleVerdict(entry: OutboxEntry, verdict: PushVerdict): void {
@@ -339,6 +526,7 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       revertAndReplay(entry);
       const idx = outbox.indexOf(entry);
       if (idx !== -1) outbox.splice(idx, 1);
+      retireEntry(entry);
       return;
     }
 
@@ -365,13 +553,13 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         // for reject, found by independent review during DAN-776 (part 2's fix only covered reject).
         replaySiblings(entry.entityType, targetId, entry);
       });
-      if (verdict.version !== undefined) versions.set(toKey(entry.entityType, targetId), verdict.version);
+      if (verdict.version !== undefined) stampVersionIfNewer(toKey(entry.entityType, targetId), verdict.version);
       entry.pushed = true;
       return;
     }
 
     // ack
-    if (verdict.version !== undefined) versions.set(toKey(entry.entityType, entry.id), verdict.version);
+    if (verdict.version !== undefined) stampVersionIfNewer(toKey(entry.entityType, entry.id), verdict.version);
     entry.pushed = true;
   }
 
@@ -455,6 +643,15 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     store.runWith({ origin: "sync-pull" as WriteOrigin }, () => {
       if (change.type === "remove") store.remove(change.entityType, change.id); // §4 — semantic delete
       else if (change.data) store.set(change.entityType, change.id, change.data);
+      // DAN-777 finding B — the third sibling of the replay hazard. `reject`
+      // and `transform` both replay still-pending same-key writers after an
+      // authoritative write lands; a pull-applied change is the same event
+      // shape and, without this, visibly erases pending optimistic edits
+      // until the push echo returns (and is the enabling half of the
+      // reject-after-newer-pull divergence fixed at DAN-776's landing).
+      // Runs inside this runWith — same origin discipline as transform's
+      // replay — so the replayed writes never re-enter the outbox.
+      replaySiblings(change.entityType, change.id, null);
     });
     versions.set(k, change.version);
     // The revert gate counts WRITES, not stamps — and the shadow accumulates what they held.
@@ -467,7 +664,10 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     for (let i = outbox.length - 1; i >= 0; i--) {
       const entry = outbox[i]!;
       const confirmedSeq = confirmedMutations[entry.clientId];
-      if (confirmedSeq !== undefined && confirmedSeq >= entry.seq) outbox.splice(i, 1);
+      if (confirmedSeq !== undefined && confirmedSeq >= entry.seq) {
+        outbox.splice(i, 1);
+        retireEntry(entry);
+      }
     }
   }
 
@@ -579,6 +779,9 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
   // D20 — starts requested in priority order; none of these are awaited before the next starts.
   for (const s of orderedSubs) void pullSubscription(s.name);
 
+  // ── ADR-006 §1 — durable-outbox restore (DAN-777 finding A) ─────────────
+  if (outboxEngine) void bootDurableOutbox(outboxEngine);
+
   // ── §1c/D4 — boot-time sibling-outbox recovery, relay never re-authorship ──
   if (recoverStrandedOutbox) {
     void Promise.resolve(recoverStrandedOutbox()).then((stranded) => {
@@ -612,6 +815,10 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         if (state.resetTimer) clearTimeout(state.resetTimer);
         if (state.pollTimer) clearTimeout(state.pollTimer);
         state.liveDispose?.();
+      }
+      if (outboxEngine && outboxEngineOpened) {
+        outboxEngineOpened = false; // no writes after close — persist/retire no-op from here
+        outboxEngine.close();
       }
     },
     getRetryState(): RetryState {
