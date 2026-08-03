@@ -10,6 +10,48 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **`restAdapter` — the first real `SyncAdapter`, and the first time Stage 3 speaks HTTP end to
+  end.** `src/rest-adapter.ts` is the client half of wire protocol v1 (DAN-780): it `POST`s the
+  §7 bodies to `WIRE_PULL_PATH`/`WIRE_PUSH_PATH` (cursor in the body, never the URL — §2/C5),
+  routes every status decision through `classifyWireStatus` (§8: 408/429/5xx throw transient,
+  4xx surface permanent via a new `RestAdapterHttpError`, 409 throws the coordinator's own
+  `SchemaVersionError` so D12 outbox suspension fires on the exact seam the coordinator
+  detects), validates required response fields loudly while passing unknown fields through
+  untouched (§3's additive rule, both halves), and deliberately has **no** `subscribe()` (v1
+  defines no live channel), **no** comparator (server-authoritative reference), and **no**
+  predicate surface (rev c C2-1 — held closed at compile time by `@ts-expect-error` probes that
+  fail `typecheck` the day a `where`/`filter`/`query` slot appears).
+
+  `src/rest-adapter.spec.ts` runs `runSyncAdapterContract` against the real adapter backed by a
+  minimally §13-conformant in-memory stub server, with **every kit hook supplied — zero skipped
+  conformance blocks** (12 of 13 obligations exercised; the live-channel one is satisfied by the
+  deliberate absence of `subscribe()`) — plus wire-mapping tests for the HTTP layer the kit
+  cannot see, and one
+  integration test wiring `enableSync → restAdapter → stub server`: local write → push over
+  HTTP → pull's `confirmedMutations` drops the overlay → server-seeded change applies under
+  `sync-pull`. Seven mechanisms watched to fail (red-then-green, recorded on DAN-780), including
+  the D1 proof that omitting `confirmedMutations` server-side leaves the overlay pending forever.
+
+  **Not exported from `index.ts`** (ADR-022 lines 1-2, same precedent as the rest of the sync
+  surface), and per the protocol doc's §14 — updated this change — v1 therefore stays DRAFT: the
+  freeze trigger is the first export/publish of the sync surface, not this in-tree landing. The
+  stub server is a test fixture, not ADR-023's server conformance kit (artifact 2, still open)
+  nor its reference server (artifact 3). Two adversarial review rounds each found real
+  validation gaps after "all gates green". Round 1 (pre-hand-off): a set change's `data`
+  unchecked (null data would stamp a version without a write: permanent silent divergence),
+  `confirmedMutations` values unchecked (a null seq pins the overlay forever), reset's cursor
+  unchecked, and a case-sensitive header merge that duplicated `Content-Type`. Round 2 (the
+  landing gauntlet, with executed repros through the real coordinator) found the **sibling-branch
+  twins of round 1's fixes, live on the push-verdict channel**: an ack's `version: null` stamped
+  into the version map outranks every later HLC-string token lexicographically (server truth
+  dropped forever, nothing errors); a transform's truthy non-object `data` reaches
+  `store.replace` and poisons the reject re-base shadow; and a transform's `remappedId: ""` is
+  non-nullish (becomes the target id) yet falsy (skips the remap block), landing the server's
+  correction under id `""` while the real entity keeps the stale value. All fixed with tests
+  watched red first; a non-JSON 200 (proxy HTML page) now also gets the loud `malformed`
+  diagnosis instead of a bare SyntaxError. Suite 566 → 630 (plus `packages/mcp`'s 29, unchanged;
+  the 2 pre-existing skips are `engine-conformance.spec.ts`'s sqlite-wasm-unavailable pair).
+
 - **The sync coordinator — `enableSync(store, opts)` — Stage 3 goes from a frozen contract to a
   working local-first sync loop.** `src/coordinator.ts` implements every numbered behavior in
   ADR-006 rev d's "Coordinator semantics": the outbox tap (`store.subscribe()` filtered on

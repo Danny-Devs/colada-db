@@ -307,4 +307,4 @@ Notably **not** required: subscriptions, checksums, a live channel, `intent` rep
 
 - **The server conformance kit does not exist yet.** Until it does, this document is a claim rather than a check — which is exactly the state ADR-023 says the protocol must not stay in. It is the next artifact.
 - **The reference server does not exist yet.** Third in the ship order, deliberately.
-- **`v1` is not frozen.** It freezes when the first adapter ships against it. Say so loudly at that moment; it is a one-way door.
+- **`v1` is not frozen.** `restAdapter` (`src/rest-adapter.ts`, DAN-780) exists in-tree and passes the client conformance kit against a stub of this protocol — but it is **unexported**, and in-tree is not shipped. The freeze trigger is the first **export/publish** of the sync surface (the separate, deliberate ADR-022 act that promotes it to a published entry point). Until then this document may still change freely; at that moment, say so loudly — it is a one-way door.
