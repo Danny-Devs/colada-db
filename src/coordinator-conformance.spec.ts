@@ -1012,13 +1012,18 @@ describe("SchemaVersionError detection is name-based, never message-text matchin
  *  previous session's rows and inspect what the coordinator persisted. The
  *  Map OUTLIVES enableSync instances — that persistence across "reloads" is
  *  the entire subject under test. */
-function fakeOutboxEngine(rows: Map<string, unknown> = new Map(), opts: { openDelayMs?: number } = {}) {
+function fakeOutboxEngine(
+  rows: Map<string, unknown> = new Map(),
+  opts: { openDelayMs?: number; failLoadAll?: boolean } = {},
+) {
+  let closes = 0;
   const engine: StorageEngine = {
     isSupported: () => true,
     async open() {
       if (opts.openDelayMs) await new Promise((r) => setTimeout(r, opts.openDelayMs));
     },
     async loadAll() {
+      if (opts.failLoadAll) throw new Error("simulated loadAll fault");
       return [...rows.entries()].map(([key, data]) => ({ key: key as EntityKey, data }));
     },
     async loadMany(keys) {
@@ -1028,9 +1033,11 @@ function fakeOutboxEngine(rows: Map<string, unknown> = new Map(), opts: { openDe
       for (const p of puts) rows.set(p.key, p.value);
       for (const d of deletes) rows.delete(d);
     },
-    close() {},
+    close() {
+      closes += 1;
+    },
   };
-  return { engine, rows };
+  return { engine, rows, closeCount: () => closes };
 }
 
 describe("DAN-777 finding B — pull-apply replays still-pending same-key writers", () => {
@@ -1092,7 +1099,12 @@ describe("DAN-777 finding B — pull-apply replays still-pending same-key writer
     await tick(); // v10 stamped mid-flight
 
     release();
-    await tick(); // transform applies its data (D2), but must NOT stamp v5 over v10
+    await tick();
+    // Review B1 (DAN-777 gauntlet): the STALE transform's DATA must not
+    // overwrite the newer pull's state either — a guard that protects only
+    // the stamp makes the divergence permanent, because the correct v10 can
+    // never re-apply ("same"). Store keeps the replayed pending edit.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "LOCAL" });
 
     // The discriminating probe: a later v7 change. Guarded stamp → known is
     // still 10 → v7 classifies "older" and is skipped. A regressed stamp (5)
@@ -1105,7 +1117,7 @@ describe("DAN-777 finding B — pull-apply replays still-pending same-key writer
     });
     scripted.emitLive({ type: "poke" });
     await tick();
-    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "TRANSFORMED" });
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "LOCAL" });
   });
 
   it("an ack verdict's version stamp never regresses a newer pull's stamp", async () => {
@@ -1241,5 +1253,175 @@ describe("DAN-777 finding A — the durable outbox (ADR-006 §1)", () => {
     localWrite(store2, "Widget", "w2", { id: "w2" });
     await tick();
     expect(s2.pushCalls[0]![0]!.seq).toBe(1);
+  });
+});
+
+describe("DAN-777 review round — lifecycle, fault, and boot-window findings", () => {
+  it("B2: stop() during a slow outbox-engine open still closes the engine", async () => {
+    const { engine, closeCount } = fakeOutboxEngine(new Map(), { openDelayMs: 15 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-b2", outboxEngine: engine });
+    handle.stop(); // React strict-mode double-mount shape: stop before open resolves
+    await tick(40);
+    // A leaked engine handle can hold an exclusive OPFS lock and silently
+    // degrade the NEXT instance to in-memory — resurrecting finding A.
+    expect(closeCount()).toBe(1);
+  });
+
+  it("A1: a delta-style confirmation mark arriving before the restore completes still retires the restored entry", async () => {
+    const rows = new Map<string, unknown>();
+    // Session 1: a pending entry persists, verdict never arrives.
+    const s1 = makeScriptedAdapter();
+    s1.queuePush(() => new Promise<never>(() => {}));
+    const h1 = boot(freshStore(), { adapter: s1.adapter, clientId: "c-a1", outboxEngine: fakeOutboxEngine(rows).engine });
+    await tick(5);
+    const store1 = freshStore(); // (unused holder to keep shape parallel)
+    void store1;
+    // the write goes through the session-1 store bound at boot:
+    // (boot() bound the store above — write via a fresh reference)
+    h1.stop();
+    // Session 1 wrote nothing yet — redo properly: boot bound its own store.
+    expect(rows.size).toBe(0);
+
+    const storeA = freshStore();
+    const sA = makeScriptedAdapter();
+    sA.queuePush(() => new Promise<never>(() => {}));
+    const hA = boot(storeA, { adapter: sA.adapter, clientId: "c-a1", outboxEngine: fakeOutboxEngine(rows).engine });
+    await tick(5);
+    localWrite(storeA, "Widget", "w1", { id: "w1", label: "pending" });
+    await tick();
+    hA.stop();
+    expect([...rows.keys()].some((k) => k.startsWith("outbox-entry:"))).toBe(true);
+
+    // Session 2: engine opens SLOWLY; the boot pull races ahead and delivers
+    // the confirmation mark exactly once (delta-style, Replicache
+    // lastMutationIDChanges — legal under ADR-006), then never again.
+    const storeB = freshStore();
+    const sB = makeScriptedAdapter();
+    sB.queuePull(
+      { type: "changes", changes: [], cursor: "1", complete: true, confirmedMutations: { "c-a1": 1 } },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    const hB = boot(storeB, {
+      adapter: sB.adapter,
+      clientId: "c-a1",
+      outboxEngine: fakeOutboxEngine(rows, { openDelayMs: 20 }).engine,
+    });
+    await tick(60);
+    // The mark's high-water must retire the late-restored entry — otherwise
+    // it re-pushes forever as a ghost.
+    expect(hB.getPendingCount()).toBe(0);
+    expect(sB.pushCalls.flat()).toHaveLength(0);
+    expect([...rows.keys()].some((k) => k.startsWith("outbox-entry:"))).toBe(false);
+  });
+
+  it("A2: a loadAll fault degrades to in-memory WITHOUT clobbering the previous session's rows", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rows = new Map<string, unknown>([
+      ["outbox-meta:seq", { seq: 3 }],
+      [
+        "outbox-entry:3",
+        { mutationId: "m-old", clientId: "c-a2", seq: 3, op: "set", entityType: "Widget", id: "w1", data: { id: "w1" }, previousExisted: false },
+      ],
+    ]);
+    const { engine } = fakeOutboxEngine(rows, { failLoadAll: true });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-a2", outboxEngine: engine });
+    await tick(5);
+    localWrite(store, "Widget", "w2", { id: "w2", label: "post-fault" });
+    await tick();
+    // §1's own requirement: a fault can never destroy unpushed writes. A
+    // half-open engine writing seq-1 keys over the old session's rows does.
+    expect(rows.get("outbox-entry:3")).toMatchObject({ mutationId: "m-old" });
+    expect(rows.has("outbox-entry:1")).toBe(false);
+    expect(rows.get("outbox-meta:seq")).toEqual({ seq: 3 });
+  });
+
+  it("A3: a pull applying during the pre-boot window replays the buffered pending writer", async () => {
+    const { engine } = fakeOutboxEngine(new Map(), { openDelayMs: 25 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-a3", outboxEngine: engine });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "buffered edit" }); // engine still opening
+    await tick(1); // let the BOOT pull settle first — a poke racing an in-flight
+    // pull is dropped (pullInFlight), which would make this test pass vacuously
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SERVER" }, version: 5 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(2); // still inside the 25ms boot window
+    // Finding B holds inside the window too: the buffered pending edit stays
+    // visible on top of the applied server value.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "buffered edit" });
+    await tick(40); // boot completes; entry materializes and pushes normally
+    expect(scripted.pushCalls.flat().some((c) => c.id === "w1")).toBe(true);
+  });
+
+  it("A4: a transform id-remap reaches entries still in the pre-boot buffer", async () => {
+    const { engine } = fakeOutboxEngine(new Map(), { openDelayMs: 25 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    // First push (the adopted sibling entry) gets a transform with an id
+    // remap; every later push is acked.
+    scripted.queuePush(
+      (batch) => ({
+        results: batch.map((c) => ({
+          mutationId: c.mutationId,
+          status: "transform" as const,
+          data: { id: "srv-1", label: "corrected" },
+          version: 1,
+          remappedId: "srv-1",
+        })),
+      }),
+      (batch) => ({ results: batch.map((c) => ({ mutationId: c.mutationId, status: "ack" as const, version: 2 })) }),
+    );
+    boot(store, {
+      adapter: scripted.adapter,
+      clientId: "c-a4",
+      outboxEngine: engine,
+      recoverStrandedOutbox: () => [
+        {
+          mutationId: "m-sib",
+          clientId: "sib-client",
+          seq: 1,
+          op: "set" as const,
+          entityType: "Widget",
+          id: "temp-1",
+          data: { id: "temp-1", label: "sibling write" },
+          previousExisted: false,
+        },
+      ],
+    });
+    // The app's own write to the same temp id, buffered behind the slow open.
+    localWrite(store, "Widget", "temp-1", { id: "temp-1", label: "mine too" });
+    await tick(5); // adoption pushes; the remap lands while the buffer still holds our write
+    await tick(40); // boot completes; buffered entry materializes and pushes
+    const own = scripted.pushCalls.flat().filter((c) => c.clientId === "c-a4");
+    expect(own).toHaveLength(1);
+    // Without the buffer rewrite this ships the dead temp id.
+    expect(own[0]!.id).toBe("srv-1");
+    expect(own[0]!.baseVersion).toBeUndefined();
+  });
+
+  it("A5: a corrupt persisted entry row is skipped instead of poisoning seq to NaN", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rows = new Map<string, unknown>([
+      ["outbox-meta:seq", { seq: 2 }],
+      ["outbox-entry:9", { garbage: true }],
+    ]);
+    const { engine } = fakeOutboxEngine(rows);
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-a5", outboxEngine: engine });
+    await tick(5);
+    localWrite(store, "Widget", "w1", { id: "w1" });
+    await tick();
+    expect(scripted.pushCalls[0]![0]!.seq).toBe(3); // numeric, from the watermark — never NaN
   });
 });

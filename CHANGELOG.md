@@ -41,6 +41,22 @@ than this file's older `[feat]`/`[fix]` tags.
   both guarded stamps, watermark restore, entry persistence, and the pre-boot buffer. Suite
   630 → 637.
 
+  **A fresh-context review round then found 7 more, all fixed here with red-first tests
+  (suite → 643):** the serious one was the residual half of the stamp guard itself — a STALE
+  transform's *data* still applied unconditionally, and with the stamp correctly kept newer,
+  the divergence became permanent (re-delivery classifies "same" and can never heal; the
+  initial stamp test had even pinned the divergent value as expected). Stale transforms now
+  skip the data apply and sibling replay while still applying the id remap (identity is not
+  versioned). Also fixed: `stop()` during a slow engine `open()` leaked the handle (an OPFS
+  lock held by the leak degrades the *next* instance to in-memory — resurrecting the exact
+  finding-A hazard); a `loadAll` fault left the engine writable, clobbering the previous
+  session's rows with fresh seq-1 keys (now degrades to pure in-memory); a delta-style
+  confirmation mark arriving before the restore/adoption completed left a ghost entry
+  re-pushing forever (a per-client high-water mark now retires late-restored entries);
+  finding B and id-remaps now reach writes still buffered behind the boot window; one corrupt
+  persisted row no longer poisons `seqCounter` to NaN; and `getPendingCount()` counts
+  buffered pre-boot writes.
+
 - **`restAdapter` — the first real `SyncAdapter`, and the first time Stage 3 speaks HTTP end to
   end.** `src/rest-adapter.ts` is the client half of wire protocol v1 (DAN-780): it `POST`s the
   §7 bodies to `WIRE_PULL_PATH`/`WIRE_PUSH_PATH` (cursor in the body, never the URL — §2/C5),

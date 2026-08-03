@@ -214,6 +214,10 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
   const outbox: OutboxEntry[] = [];
   let seqCounter = 0;
   const nextSeq = (): number => (seqCounter += 1);
+  /** Highest `confirmedMutations` mark seen per clientId (review A1) — so a
+   *  mark that arrived before a restore/adoption completed still retires the
+   *  late-arriving entries it covers. Marks are cumulative by definition. */
+  const confirmedHighWater = new Map<string, number>();
 
   // ── ADR-006 §1 — the durable outbox (DAN-777 finding A) ─────────────────
   // Row layout in the caller-supplied SEPARATE engine: one meta row holding
@@ -312,32 +316,63 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       if (engine.isSupported()) {
         await engine.open();
         outboxEngineOpened = true;
-        if (!stopped) {
-          const rows = await engine.loadAll();
-          if (!stopped) {
-            let watermark = 0;
-            const restored: PersistedOutboxEntry[] = [];
-            for (const row of rows) {
-              if (row.key === OUTBOX_META_KEY) {
-                const seq = (row.data as { seq?: unknown } | undefined)?.seq;
-                if (typeof seq === "number") watermark = Math.max(watermark, seq);
-              } else if (row.key.startsWith("outbox-entry:")) {
-                restored.push(row.data as PersistedOutboxEntry);
-              }
+        // Review B2 (DAN-777 gauntlet): stop() before open() resolved cannot
+        // close what is not yet open — so the close is owed HERE. A leaked
+        // handle can hold an exclusive OPFS lock and silently degrade the
+        // next instance to in-memory, resurrecting the finding-A hazard.
+        if (stopped) {
+          outboxEngineOpened = false;
+          engine.close();
+          return;
+        }
+        const rows = await engine.loadAll();
+        if (stopped) {
+          outboxEngineOpened = false;
+          engine.close();
+          return;
+        }
+        let watermark = 0;
+        const restored: PersistedOutboxEntry[] = [];
+        for (const row of rows) {
+          if (row.key === OUTBOX_META_KEY) {
+            const seq = (row.data as { seq?: unknown } | undefined)?.seq;
+            if (typeof seq === "number") watermark = Math.max(watermark, seq);
+          } else if (row.key.startsWith("outbox-entry:")) {
+            const p = row.data as PersistedOutboxEntry | undefined;
+            // Review A5: one corrupt row must not poison seqCounter to NaN —
+            // every later seq would be NaN on the wire and every later row
+            // key would collide on disk.
+            if (typeof p?.seq !== "number" || typeof p?.mutationId !== "string") {
+              console.warn(`[colada-db sync] skipping corrupt durable-outbox row ${row.key}`);
+              continue;
             }
-            restored.sort((a, b) => a.seq - b.seq);
-            for (const p of restored) {
-              // Session floor 0 and pushed:false — see PersistedOutboxEntry.
-              outbox.push({ ...p, baseServerGen: 0, pushed: false });
-              watermark = Math.max(watermark, p.seq);
-            }
-            seqCounter = Math.max(seqCounter, watermark);
+            restored.push(p);
           }
         }
+        restored.sort((a, b) => a.seq - b.seq);
+        for (const p of restored) {
+          watermark = Math.max(watermark, p.seq);
+          // Review A1: a confirmation mark can arrive BEFORE the restore
+          // completes (the boot pull races the engine open, and delta-style
+          // marks — Replicache lastMutationIDChanges — are sent once). An
+          // already-confirmed entry re-pushed forever is a ghost; retire it
+          // now instead of restoring it.
+          if ((confirmedHighWater.get(p.clientId) ?? 0) >= p.seq) {
+            engine.writeBatch([], [entryKey(p.seq)]).catch(warnOutboxPersist);
+            continue;
+          }
+          // Session floor 0 and pushed:false — see PersistedOutboxEntry.
+          outbox.push({ ...p, baseServerGen: 0, pushed: false });
+        }
+        seqCounter = Math.max(seqCounter, watermark);
       } else {
         console.warn("[colada-db sync] outboxEngine.isSupported() is false — outbox is in-memory this session");
       }
     } catch (err) {
+      // Review A2: a read fault must degrade to PURE in-memory. Leaving the
+      // engine writable would persist fresh seq-1 rows over the previous
+      // session's still-unpushed entries — §1's one forbidden outcome.
+      outboxEngineOpened = false;
       warnOutboxPersist(err);
     }
     if (stopped) return;
@@ -461,6 +496,17 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       if (other.op === "set" && other.data) store.set(other.entityType, other.id, other.data);
       else if (other.op === "remove") store.remove(other.entityType, other.id);
     }
+    // Review A3: writes buffered behind the durable-outbox boot are pending
+    // local writers too — finding B must hold inside the boot window, or the
+    // exact "optimistic edit visibly vanishes" symptom returns for its
+    // duration. Buffered entries are never pushed, so none can be `exclude`.
+    if (preBootBuffer) {
+      for (const captured of preBootBuffer) {
+        if (toKey(captured.entityType, captured.id) !== k) continue;
+        if (captured.op === "set" && captured.data) store.set(captured.entityType, captured.id, captured.data);
+        else if (captured.op === "remove") store.remove(captured.entityType, captured.id);
+      }
+    }
   }
 
   /** ADR-006 "Implementation note, part 2" — revert to previousData, then replay any OTHER
@@ -504,6 +550,16 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         persistEntry(entry);
       }
     }
+    // Review A4: entries still buffered behind the boot are outbox-shaped
+    // state too — left unrewritten they materialize and push a dead temp id.
+    if (preBootBuffer) {
+      for (const captured of preBootBuffer) {
+        if (captured.entityType === entityType && captured.id === oldId) {
+          captured.id = newId;
+          captured.baseVersion = undefined;
+        }
+      }
+    }
   }
 
   /**
@@ -533,8 +589,21 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     if (verdict.status === "transform") {
       // D2 — id remap + corrected entity apply immediately; overlay drop still waits (below, unchanged).
       const targetId = verdict.remappedId ?? entry.id;
+      // Review B1 (DAN-777 gauntlet): push and pull overlap (D17), so a
+      // transform's data can arrive carrying a version OLDER than what a pull
+      // stamped mid-flight. Applying it anyway is permanent divergence — the
+      // guarded stamp keeps the newer version, so the newer state's re-delivery
+      // classifies "same" and can never heal the store. A stale transform
+      // skips the data apply and the sibling replay (nothing was erased); the
+      // id remap below still runs — identity correction is not versioned, and
+      // queued entries would otherwise keep pushing a dead temp id.
+      const knownBeforeApply = versions.get(toKey(entry.entityType, entry.id));
+      const staleTransform =
+        verdict.version !== undefined &&
+        knownBeforeApply !== undefined &&
+        compareVersions(verdict.version, knownBeforeApply) === "older";
       store.runWith({ origin: "sync-pull" as WriteOrigin }, () => {
-        if (verdict.data) {
+        if (verdict.data && !staleTransform) {
           applyReplaceOrRemove(entry.entityType, targetId, verdict.data);
           // An authoritative store write outside applyRemoteChange — the reject gate must see
           // it, or a same-key reject reverts commit-time previousData over the server's
@@ -544,14 +613,18 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
           recordServerWrite(toKey(entry.entityType, targetId), verdict.data, "replace");
         }
         if (verdict.remappedId && verdict.remappedId !== entry.id) {
-          store.remove(entry.entityType, entry.id); // "one move event" — see ADR implementation note part 2
+          // Skip the "move" remove when stale: the store's content under the
+          // temp id is NEWER than this verdict; the server's own feed delivers
+          // the authoritative state under the new id (and a tombstone for the
+          // temp id) in due course.
+          if (!staleTransform) store.remove(entry.entityType, entry.id); // "one move event" — see ADR implementation note part 2
           applyRemap(entry.id, entry.entityType, verdict.remappedId); // rewrites siblings' .id to targetId too
         }
         entry.id = targetId;
         // A second, still-unconfirmed writer to the same key must not be silently erased by the
         // server's correction landing on top of it — same hazard §1c/D4's revert-and-replay fixes
         // for reject, found by independent review during DAN-776 (part 2's fix only covered reject).
-        replaySiblings(entry.entityType, targetId, entry);
+        if (!staleTransform) replaySiblings(entry.entityType, targetId, entry);
       });
       if (verdict.version !== undefined) stampVersionIfNewer(toKey(entry.entityType, targetId), verdict.version);
       entry.pushed = true;
@@ -661,6 +734,11 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
 
   function dropConfirmed(confirmedMutations: Record<string, number> | undefined): void {
     if (!confirmedMutations) return;
+    // Review A1: remember every mark's high-water, because entries restored
+    // (or adopted) AFTER a mark arrived must still be retired by it.
+    for (const [cid, seq] of Object.entries(confirmedMutations)) {
+      if (typeof seq === "number" && seq > (confirmedHighWater.get(cid) ?? 0)) confirmedHighWater.set(cid, seq);
+    }
     for (let i = outbox.length - 1; i >= 0; i--) {
       const entry = outbox[i]!;
       const confirmedSeq = confirmedMutations[entry.clientId];
@@ -787,6 +865,10 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
     void Promise.resolve(recoverStrandedOutbox()).then((stranded) => {
       if (stopped) return;
       for (const s of stranded) {
+        // Review A1, adoption's identical race: a mark that arrived before
+        // this recovery resolved already confirms this entry — adopting it
+        // anyway re-pushes a ghost forever under delta-style marks.
+        if ((confirmedHighWater.get(s.clientId) ?? 0) >= s.seq) continue;
         // Forwarded exactly as committed: same mutationId/clientId/seq/auth. Never re-minted.
         // previousData/previousExisted come from the sibling's own commit-time capture when
         // supplied — NOT hardcoded to "didn't exist", which would make a reject of a relayed
