@@ -41,10 +41,12 @@ interface OutboxEntry {
   id: string;
   data?: EntityRecord;
   baseVersion?: SyncVersion;
-  /** How many pull-channel store writes this key had seen when this entry captured
-   *  `previousData` — the revert gate compares against the live counter, never the version
-   *  map (an ack advances versions WITHOUT writing the store). See `revertAndReplay`. */
-  basePullGen: number;
+  /** How many authoritative server-side store writes (pull-applies + transform data-applies)
+   *  this key had seen when this entry captured `previousData` — the revert gate compares
+   *  against the live counter, never the version map (an ack advances versions WITHOUT
+   *  writing the store). Adopted entries take the session floor 0: their `previousData` is
+   *  from a previous session by construction. See `revertAndReplay`. */
+  baseServerGen: number;
   intent?: { name: string; args: unknown };
   /** rev d / D4 — minted at commit time (outbox-entry-creation time here), never at push time. */
   auth?: unknown;
@@ -192,12 +194,23 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
   // baseVersion reads from. Absent key = no baseVersion, never 0.
   const versions = new Map<EntityKeyStr, SyncVersion>();
 
-  // Monotonic per-key counter of authoritative PULL-CHANNEL store writes (bumped only when
-  // `applyRemoteChange` actually writes). The reject-revert gate reads THIS, not `versions`:
-  // ack/transform verdicts stamp a version into `versions` without any pull-side store write,
-  // and a gate on the version map would let a same-key ack falsely suppress a legitimate
-  // revert (round-2 review gauntlet, DAN-776).
-  const pullApplied = new Map<EntityKeyStr, number>();
+  // Monotonic per-key counter of authoritative server-side store writes this session —
+  // pull-applies AND transform data-applies, both of which write under `sync-pull`. The
+  // reject-revert gate reads THIS, not `versions`: an ack stamps a version into `versions`
+  // without any store write, and a gate on the version map falsely suppressed a legitimate
+  // same-key revert (round-2 review gauntlet, DAN-776).
+  const serverWriteGen = new Map<EntityKeyStr, number>();
+  // What that last authoritative write held (`data: undefined` = an authoritative remove).
+  // The reject path re-bases onto THIS when the entry's commit-time `previousData` has been
+  // superseded — merely declining to revert is not enough, because a transform's sibling
+  // replay may have baked the about-to-be-rejected edit on top of the correction, and the
+  // server's echo classifies "same" and cannot heal it (round-3 review gauntlet).
+  const serverTruth = new Map<EntityKeyStr, { data?: EntityRecord }>();
+
+  function recordServerWrite(k: EntityKeyStr, data: EntityRecord | undefined): void {
+    serverWriteGen.set(k, (serverWriteGen.get(k) ?? 0) + 1);
+    serverTruth.set(k, { data });
+  }
 
   function isLocalType(entityType: string): boolean {
     return entityDefs[entityType]?.local === true;
@@ -227,7 +240,7 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       id: event.id,
       data: event.type === "set" ? event.data : undefined,
       baseVersion: versions.get(k),
-      basePullGen: pullApplied.get(k) ?? 0,
+      baseServerGen: serverWriteGen.get(k) ?? 0,
       auth: mintAuth?.(),
       previousData: event.previousData,
       previousExisted: event.previousData !== undefined,
@@ -286,10 +299,16 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
    *  Sibling replay still runs either way. */
   function revertAndReplay(rejected: OutboxEntry): void {
     store.runWith({ origin: "undo" as WriteOrigin, transactionId: rejected.transactionId }, () => {
-      const gen = pullApplied.get(toKey(rejected.entityType, rejected.id)) ?? 0;
-      if (gen === rejected.basePullGen) {
+      const k = toKey(rejected.entityType, rejected.id);
+      if ((serverWriteGen.get(k) ?? 0) === rejected.baseServerGen) {
+        // No authoritative write since this entry captured previousData — it is the basis.
         if (rejected.previousExisted) applyReplaceOrRemove(rejected.entityType, rejected.id, rejected.previousData);
         else store.remove(rejected.entityType, rejected.id);
+      } else {
+        // Superseded — re-base onto the last server-applied value. A gen mismatch implies
+        // recordServerWrite ran for this key, so the cache entry exists.
+        const truth = serverTruth.get(k);
+        if (truth) applyReplaceOrRemove(rejected.entityType, rejected.id, truth.data);
       }
       replaySiblings(rejected.entityType, rejected.id, rejected);
     });
@@ -317,7 +336,13 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       // D2 — id remap + corrected entity apply immediately; overlay drop still waits (below, unchanged).
       const targetId = verdict.remappedId ?? entry.id;
       store.runWith({ origin: "sync-pull" as WriteOrigin }, () => {
-        if (verdict.data) applyReplaceOrRemove(entry.entityType, targetId, verdict.data);
+        if (verdict.data) {
+          applyReplaceOrRemove(entry.entityType, targetId, verdict.data);
+          // An authoritative store write outside applyRemoteChange — the reject gate must see
+          // it, or a same-key reject reverts commit-time previousData over the server's
+          // correction and the "same"-classified echo never heals it (round-3 gauntlet).
+          recordServerWrite(toKey(entry.entityType, targetId), verdict.data);
+        }
         if (verdict.remappedId && verdict.remappedId !== entry.id) {
           store.remove(entry.entityType, entry.id); // "one move event" — see ADR implementation note part 2
           applyRemap(entry.id, entry.entityType, verdict.remappedId); // rewrites siblings' .id to targetId too
@@ -420,7 +445,8 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
       else if (change.data) store.set(change.entityType, change.id, change.data);
     });
     versions.set(k, change.version);
-    pullApplied.set(k, (pullApplied.get(k) ?? 0) + 1); // the revert gate counts WRITES, not stamps
+    // The revert gate counts WRITES, not stamps — and caches what the write held.
+    recordServerWrite(k, change.type === "remove" ? undefined : change.data);
   }
 
   function dropConfirmed(confirmedMutations: Record<string, number> | undefined): void {
@@ -552,7 +578,10 @@ export function enableSync(store: EntityStore, opts: EnableSyncOptions): SyncCoo
         outbox.push({
           ...s,
           previousExisted: s.previousExisted ?? false,
-          basePullGen: pullApplied.get(toKey(s.entityType, s.id)) ?? 0, // adoption-time basis
+          // Session floor, NEVER adoption-time capture: recovery is an async read that races
+          // the boot pull, and a stranded entry's previousData is from a previous session by
+          // construction — any server write this session supersedes it (round-3 gauntlet).
+          baseServerGen: 0,
           pushed: false,
         });
       }

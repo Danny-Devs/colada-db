@@ -777,6 +777,81 @@ describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => 
     expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "X" });
   });
 
+  it("a same-key reject after a transform re-bases onto the server's corrected value", async () => {
+    // Round-3 gauntlet finding 1: transform's authoritative store write happens outside
+    // applyRemoteChange, so a write-counter fed only by pulls misses it — and a bare counter
+    // bump is not enough either, because the transform's sibling replay already baked the
+    // (about-to-be-rejected) edit on top of the correction. The reject path must re-base onto
+    // the last server-APPLIED value, not merely decline to revert.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePush((batch) => ({
+      results: batch.map((c, i) =>
+        i === 0
+          ? { mutationId: c.mutationId, status: "transform" as const, data: { id: "w1", label: "D" }, version: 7 }
+          : { mutationId: c.mutationId, status: "reject" as const },
+      ),
+    }));
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    localWrite(store, "Widget", "w1", { id: "w1", label: "X" });
+    localWrite(store, "Widget", "w1", { id: "w1", label: "B" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "D" });
+    // The echo of D@7 classifies "same" — convergence must already hold, it cannot heal here.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "D" }, version: 7 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "D" });
+  });
+
+  it("a rejected adopted entry never reverts over a value pulled this session", async () => {
+    // Round-3 gauntlet finding 2: adoption-time basis capture races the boot pull. A stranded
+    // sibling's previousData is by construction from a PREVIOUS session, so no server write
+    // this session can ever be older than it — adopted entries take the session floor (0)
+    // and any pull-write on the key supersedes their revert.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePull(
+      {
+        type: "changes",
+        changes: [remoteChange({ data: { id: "w1", label: "TODAY" }, version: 9 })],
+        cursor: "1",
+        complete: true,
+      },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    scripted.queuePush((batch) => ({
+      results: batch.map((c) => ({ mutationId: c.mutationId, status: "reject" as const })),
+    }));
+    boot(store, {
+      adapter: scripted.adapter,
+      clientId: "client-a",
+      recoverStrandedOutbox: async () => {
+        await tick(); // resolves AFTER the boot pull has applied TODAY@9
+        return [
+          {
+            mutationId: "m-yesterday",
+            clientId: "client-b",
+            seq: 1,
+            op: "set" as const,
+            entityType: "Widget",
+            id: "w1",
+            data: { id: "w1", label: "STALE-EDIT" },
+            previousData: { id: "w1", label: "YESTERDAY" },
+            previousExisted: true,
+          },
+        ];
+      },
+    });
+    await tick(5);
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "TODAY" });
+  });
+
   it("still reverts normally when no remote change landed mid-flight", async () => {
     // The gate must not break the ordinary reject path: basis unchanged ⇒ revert happens.
     const store = freshStore();

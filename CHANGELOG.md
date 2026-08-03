@@ -52,11 +52,21 @@ than this file's older `[feat]`/`[fix]` tags.
   before merge** (each new test watched to fail against the unfixed coordinator first): a `reject`
   verdict arriving after a pull had applied a newer version reverted the store to commit-time
   `previousData` anyway — and because `versions` kept the newer stamp, the identical re-pull
-  classified as "same" and was skipped, so the store diverged from the server *permanently* (the
-  revert is now gated on a per-key **pull-write generation counter** — the round-2 review caught
-  that gating on the version map instead conflates "stamp advanced" with "content changed", since
-  an ack stamps a version *without* writing the store, and that falsely suppressed the revert of
-  a rejected same-key sibling — same permanent-divergence severity, opposite direction); the
+  classified as "same" and was skipped, so the store diverged from the server *permanently*. The
+  fix took three review rounds to get right, and the intermediate designs are worth recording:
+  gating the revert on the **version map** (round 1's fix) conflated "stamp advanced" with
+  "content changed" — an ack stamps a version *without* writing the store, which falsely
+  suppressed the revert of a rejected same-key sibling; gating on a **pull-write counter alone**
+  (round 2's fix) missed that a transform's data-apply is an authoritative store write outside
+  the pull path, and that merely *declining* to revert is insufficient anyway once the
+  transform's sibling replay has baked the about-to-be-rejected edit on top of the correction.
+  The landed design: a per-key **server-write generation counter** (pull-applies + transform
+  data-applies, never ack stamps) plus a **last-server-applied value cache** — an unchanged
+  generation reverts to commit-time `previousData`; a changed one **re-bases onto the cached
+  server truth**. Adopted (sibling-recovered) entries take the session-floor generation 0 rather
+  than adoption-time capture, which races the boot pull — their `previousData` is from a
+  previous session by construction, so any server write this session supersedes it. Every
+  scenario above is a named test, each watched to fail against the code that preceded it; the
   200-iteration pull bound *applied* its accumulated incomplete pages when an adapter never set
   `complete: true` — the exact pathological adapter the bound defends against — violating
   StagedBatchesAreNotApplied (bound-hit now discards, rewinds the cursor to the cycle start, and
@@ -68,7 +78,7 @@ than this file's older `[feat]`/`[fix]` tags.
   permanently suspend the outbox on a retryable blip — now name-based. The review also replaced a
   test that asserted nothing (boot, zero writes, expect zero pushes — green against any
   implementation) with one that falsifies the deny-list origin filter (`origin !== "sync-pull"`),
-  verified red against exactly that mutant. Suite 557 → 563.
+  verified red against exactly that mutant. Suite 557 → 565.
 
 - **Pagination is tested. It shipped in `0.1.0` untested, and nobody could tell.**
   `cursorPagination`, `offsetPagination` and `relayPagination` have been exported
