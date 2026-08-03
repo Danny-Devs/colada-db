@@ -2,7 +2,7 @@
 title:       colada-db sync wire protocol, version 1
 kind:        reference
 status:      draft
-updated:     2026-08-03
+updated:     2026-08-02
 owner:       danny
 verified_by: "pnpm test -t 'wire protocol v1' (src/wire-protocol.spec.ts)"
 ---

@@ -442,6 +442,20 @@ describe("malformed 200s fail loudly — never undefined into the cursor map", (
     { name: "a reset with a non-string non-null cursor", body: { type: "reset", cursor: 42 }, endpoint: "pull" },
     { name: "push results not an array", body: { results: { m1: "ack" } }, endpoint: "push" },
     { name: "a verdict with an unknown status", body: { results: [{ mutationId: "m1", status: "maybe" }] }, endpoint: "push" },
+    // The push-verdict twins of the pull-side round-1 fixes — found live by the
+    // landing gauntlet (the sibling-branch pattern). Each had an executed
+    // corruption path through the real coordinator:
+    // an ack with version:null → versions.set(k, null) → every later HLC-string
+    // version classifies lexicographically "older" than "null" → dropped forever.
+    { name: "an ack verdict with a null version", body: { results: [{ mutationId: "m1", status: "ack", version: null }] }, endpoint: "push" },
+    // transform data is applied via store.replace AND recorded as server truth —
+    // a truthy non-object corrupts both the store and the reject re-base shadow.
+    { name: "a transform verdict with non-object data", body: { results: [{ mutationId: "m1", status: "transform", data: "garbage" }] }, endpoint: "push" },
+    // remappedId "" is not nullish, so `verdict.remappedId ?? entry.id` adopts it
+    // while the `verdict.remappedId &&` remap block skips — the correction lands
+    // under id "" and the real entity keeps the uncorrected value forever.
+    { name: "a transform verdict with an empty remappedId", body: { results: [{ mutationId: "m1", status: "transform", data: { id: "w1" }, remappedId: "" }] }, endpoint: "push" },
+    { name: "a transform verdict with a non-string remappedId", body: { results: [{ mutationId: "m1", status: "transform", data: { id: "w1" }, remappedId: 42 }] }, endpoint: "push" },
   ];
   for (const c of cases) {
     it(`rejects: ${c.name}`, async () => {
@@ -451,6 +465,15 @@ describe("malformed 200s fail loudly — never undefined into the cursor map", (
       await expect(call).rejects.toThrow(/malformed/);
     });
   }
+
+  it("rejects a 200 whose body is not JSON with the adapter's own malformed error", async () => {
+    // The most common real-world malformed 200 is a proxy's HTML error page —
+    // it should carry the loud diagnosis, not escape as a bare SyntaxError.
+    const impl = (async () =>
+      new Response("<html>gateway error</html>", { status: 200 })) as unknown as typeof globalThis.fetch;
+    const adapter = restAdapter({ baseUrl: "https://x.test", fetch: impl });
+    await expect(adapter.pull(null)).rejects.toThrow(/malformed/);
+  });
 });
 
 describe("additive tolerance — §3: unknown fields ignored, known ones untouched", () => {

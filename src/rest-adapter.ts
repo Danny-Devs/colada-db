@@ -152,6 +152,22 @@ function toPushResult(body: unknown): PushResult {
     if (verdict.status !== "ack" && verdict.status !== "reject" && verdict.status !== "transform") {
       throw malformed(WIRE_PUSH_PATH, `a verdict has unknown status ${JSON.stringify(verdict.status)}`);
     }
+    // The push-verdict twins of the pull-side checks above — same hazard
+    // classes, other channel (found by the landing gauntlet's sibling-branch
+    // sweep). A null version would be stamped into the coordinator's version
+    // map and lexicographically outrank real tokens forever; truthy non-object
+    // transform data reaches store.replace AND the reject re-base shadow; an
+    // empty-string remappedId is non-nullish (so it becomes the target id) yet
+    // falsy (so the remap block skips) — the correction lands under id "".
+    if (verdict.version !== undefined && typeof verdict.version !== "string" && typeof verdict.version !== "number") {
+      throw malformed(WIRE_PUSH_PATH, "a verdict's version is neither a string nor a number");
+    }
+    if (verdict.data !== undefined && !isRecord(verdict.data)) {
+      throw malformed(WIRE_PUSH_PATH, "a verdict's data is not an entity object");
+    }
+    if (verdict.remappedId !== undefined && (typeof verdict.remappedId !== "string" || verdict.remappedId === "")) {
+      throw malformed(WIRE_PUSH_PATH, "a verdict's remappedId is not a non-empty string");
+    }
   }
   return body as unknown as PushResult;
 }
@@ -189,7 +205,15 @@ export function restAdapter(options: RestAdapterOptions): SyncAdapter {
     });
 
     const outcome = classifyWireStatus(response.status);
-    if (outcome === "verdict") return response.json();
+    if (outcome === "verdict") {
+      // A 200 that isn't JSON (a proxy's HTML error page is the common case)
+      // gets the loud diagnosis, not a bare SyntaxError. Still retryable.
+      try {
+        return await response.json();
+      } catch {
+        throw malformed(path, "body is not valid JSON");
+      }
+    }
     if (outcome === "schema") {
       // §8: 409 is the schema-mismatch / seq-gap channel. The coordinator
       // suspends the outbox on this exact class (D12) — never drains it.

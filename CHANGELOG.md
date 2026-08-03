@@ -36,13 +36,21 @@ than this file's older `[feat]`/`[fix]` tags.
   surface), and per the protocol doc's §14 — updated this change — v1 therefore stays DRAFT: the
   freeze trigger is the first export/publish of the sync surface, not this in-tree landing. The
   stub server is a test fixture, not ADR-023's server conformance kit (artifact 2, still open)
-  nor its reference server (artifact 3). A fresh-context self-review before hand-off found four
-  real validation gaps — a set change's `data` unchecked (null data would stamp a version
-  without a write: permanent silent divergence), `confirmedMutations` values unchecked (a null
-  seq pins the overlay forever), reset's cursor unchecked, and a case-sensitive header merge
-  that duplicated `Content-Type` — all fixed with tests watched red first. Suite 566 → 625
-  (plus `packages/mcp`'s 29, unchanged; the 2 pre-existing skips are
-  `engine-conformance.spec.ts`'s sqlite-wasm-unavailable pair).
+  nor its reference server (artifact 3). Two adversarial review rounds each found real
+  validation gaps after "all gates green". Round 1 (pre-hand-off): a set change's `data`
+  unchecked (null data would stamp a version without a write: permanent silent divergence),
+  `confirmedMutations` values unchecked (a null seq pins the overlay forever), reset's cursor
+  unchecked, and a case-sensitive header merge that duplicated `Content-Type`. Round 2 (the
+  landing gauntlet, with executed repros through the real coordinator) found the **sibling-branch
+  twins of round 1's fixes, live on the push-verdict channel**: an ack's `version: null` stamped
+  into the version map outranks every later HLC-string token lexicographically (server truth
+  dropped forever, nothing errors); a transform's truthy non-object `data` reaches
+  `store.replace` and poisons the reject re-base shadow; and a transform's `remappedId: ""` is
+  non-nullish (becomes the target id) yet falsy (skips the remap block), landing the server's
+  correction under id `""` while the real entity keeps the stale value. All fixed with tests
+  watched red first; a non-JSON 200 (proxy HTML page) now also gets the loud `malformed`
+  diagnosis instead of a bare SyntaxError. Suite 566 → 630 (plus `packages/mcp`'s 29, unchanged;
+  the 2 pre-existing skips are `engine-conformance.spec.ts`'s sqlite-wasm-unavailable pair).
 
 - **The sync coordinator — `enableSync(store, opts)` — Stage 3 goes from a frozen contract to a
   working local-first sync loop.** `src/coordinator.ts` implements every numbered behavior in
