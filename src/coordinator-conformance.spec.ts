@@ -28,7 +28,7 @@ import {
 } from "./coordinator-conformance";
 import { SYNC_CONTRACT_COVERAGE } from "./sync-conformance";
 import type { SyncAdapter } from "./sync-types";
-import type { EntityStore } from "./types";
+import type { EntityKey, EntityStore, StorageEngine } from "./types";
 
 function localWrite(
   store: EntityStore,
@@ -736,7 +736,11 @@ describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => 
     });
     scripted.emitLive({ type: "poke" });
     await tick();
-    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C" });
+    // DAN-777 finding B: the pull-apply replays the still-pending writer on
+    // top (C landed underneath, B stays visible) — before that fix this line
+    // pinned {label: "C"}, i.e. the optimistic edit visibly vanishing until
+    // the push echo returned.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "B" });
 
     release();
     await tick();
@@ -893,7 +897,10 @@ describe("reject arriving after a newer pull (review gauntlet, DAN-776)", () => 
     });
     scripted.emitLive({ type: "poke" });
     await tick();
-    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "C", color: "red" });
+    // DAN-777 finding B: the pending writer (B) is replayed over the merged
+    // partial apply, so the merge's effect on the SHADOW is what the final
+    // assertion below proves — the store mid-flight shows the optimistic edit.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "B", color: "red" });
 
     release();
     await tick();
@@ -994,5 +1001,646 @@ describe("SchemaVersionError detection is name-based, never message-text matchin
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAN-777 — the two deliberate deferrals from DAN-776's landing review
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** An in-memory StorageEngine over a caller-visible Map, so tests can seed a
+ *  previous session's rows and inspect what the coordinator persisted. The
+ *  Map OUTLIVES enableSync instances — that persistence across "reloads" is
+ *  the entire subject under test. */
+function fakeOutboxEngine(
+  rows: Map<string, unknown> = new Map(),
+  opts: { openDelayMs?: number; failLoadAll?: boolean; loadAllDelayMs?: number } = {},
+) {
+  let closes = 0;
+  const engine: StorageEngine = {
+    isSupported: () => true,
+    async open() {
+      if (opts.openDelayMs) await new Promise((r) => setTimeout(r, opts.openDelayMs));
+    },
+    async loadAll() {
+      if (opts.loadAllDelayMs) await new Promise((r) => setTimeout(r, opts.loadAllDelayMs));
+      if (opts.failLoadAll) throw new Error("simulated loadAll fault");
+      return [...rows.entries()].map(([key, data]) => ({ key: key as EntityKey, data }));
+    },
+    async loadMany(keys) {
+      return keys.filter((k) => rows.has(k)).map((k) => ({ key: k, data: rows.get(k) }));
+    },
+    async writeBatch(puts, deletes) {
+      for (const p of puts) rows.set(p.key, p.value);
+      for (const d of deletes) rows.delete(d);
+    },
+    close() {
+      closes += 1;
+    },
+  };
+  return { engine, rows, closeCount: () => closes };
+}
+
+describe("DAN-777 finding B — pull-apply replays still-pending same-key writers", () => {
+  it("replays multiple pending writers in outbox order, and none re-enter the outbox", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.queuePush(() => new Promise<never>(() => {})); // verdicts never arrive — both writers stay pending
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "one" });
+    localWrite(store, "Widget", "w1", { id: "w1", label: "two" });
+    await tick();
+    expect(handle.getPendingCount()).toBe(2);
+    const pushCallsBefore = scripted.pushCalls.length;
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SERVER" }, version: 5 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+
+    // Outbox order: "one" then "two" replayed over the applied SERVER value.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "two" });
+    // The replay ran under the pull's own write channel — no echo, no new entries.
+    expect(handle.getPendingCount()).toBe(2);
+    expect(scripted.pushCalls.length).toBe(pushCallsBefore);
+  });
+
+  it("a transform verdict's version stamp never regresses a newer pull's stamp", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              results: [
+                { mutationId: batch[0]!.mutationId, status: "transform" as const, data: { id: "w1", label: "TRANSFORMED" }, version: 5 },
+              ],
+            });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "LOCAL" });
+    await tick(); // push in flight, verdict held
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "TEN" }, version: 10 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(); // v10 stamped mid-flight
+
+    release();
+    await tick();
+    // Review B1 (DAN-777 gauntlet): the STALE transform's DATA must not
+    // overwrite the newer pull's state either — a guard that protects only
+    // the stamp makes the divergence permanent, because the correct v10 can
+    // never re-apply ("same"). Store keeps the replayed pending edit.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "LOCAL" });
+
+    // The discriminating probe: a later v7 change. Guarded stamp → known is
+    // still 10 → v7 classifies "older" and is skipped. A regressed stamp (5)
+    // would classify v7 "newer" and apply it.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SEVEN" }, version: 7 })],
+      cursor: "3",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "LOCAL" });
+  });
+
+  it("an ack verdict's version stamp never regresses a newer pull's stamp", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () => resolve({ results: [{ mutationId: batch[0]!.mutationId, status: "ack" as const, version: 5 }] });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "LOCAL" });
+    await tick(); // in flight
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "TEN" }, version: 10 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(); // v10 applied and stamped; the pending LOCAL replayed on top
+
+    release();
+    await tick(); // ack v5 — stamp must keep 10
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SEVEN" }, version: 7 })],
+      cursor: "3",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    // Guarded stamp: v7 skipped, the replayed LOCAL edit stays. Regressed
+    // stamp: v7 applies (the acked entry is pushed, so nothing replays over it).
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "LOCAL" });
+  });
+});
+
+describe("DAN-777 finding A — the durable outbox (ADR-006 §1)", () => {
+  it("seq resumes from the persisted watermark after confirmation and reload — post-reload writes are not silently ignored", async () => {
+    // One shared rows map, a FRESH engine per session — the StorageEngine
+    // contract forbids calls after close(), which a reload never makes anyway.
+    const rows = new Map<string, unknown>();
+
+    // Session 1: write, push (seq 1), confirm via the pull channel, stop.
+    const store1 = freshStore();
+    const s1 = makeScriptedAdapter();
+    const h1 = boot(store1, { adapter: s1.adapter, clientId: "stable-client", outboxEngine: fakeOutboxEngine(rows).engine });
+    await tick(5);
+    localWrite(store1, "Widget", "w1", { id: "w1", label: "first" });
+    await tick();
+    expect(s1.pushCalls[0]![0]!.seq).toBe(1);
+    s1.queuePull({ type: "changes", changes: [], cursor: "2", complete: true, confirmedMutations: { "stable-client": 1 } });
+    s1.emitLive({ type: "poke" });
+    await tick();
+    expect(h1.getPendingCount()).toBe(0);
+    h1.stop();
+
+    // The confirmed entry's row is deleted; the watermark row is NOT derived
+    // from surviving entries, so it must still say 1.
+    expect([...rows.keys()].filter((k) => k.startsWith("outbox-entry:"))).toEqual([]);
+    expect(rows.get("outbox-meta:seq")).toEqual({ seq: 1 });
+
+    // Session 2, same clientId + same store: the next write must be seq 2 —
+    // seq 1 would be <= the server's lastSeen and silently ignored forever.
+    const store2 = freshStore();
+    const s2 = makeScriptedAdapter();
+    boot(store2, { adapter: s2.adapter, clientId: "stable-client", outboxEngine: fakeOutboxEngine(rows).engine });
+    await tick(5);
+    localWrite(store2, "Widget", "w2", { id: "w2", label: "after reload" });
+    await tick();
+    expect(s2.pushCalls[0]![0]!.seq).toBe(2);
+  });
+
+  it("a pending (unconfirmed) entry survives reload and is re-pushed with identical identity — relay, never re-authorship", async () => {
+    const rows = new Map<string, unknown>(); // shared rows, fresh engine per session
+
+    const store1 = freshStore();
+    const s1 = makeScriptedAdapter();
+    s1.queuePush(() => new Promise<never>(() => {})); // the verdict never arrives this session
+    const h1 = boot(store1, { adapter: s1.adapter, clientId: "c-durable", outboxEngine: fakeOutboxEngine(rows).engine });
+    await tick(5);
+    localWrite(store1, "Widget", "w1", { id: "w1", label: "pending across reload" });
+    await tick();
+    const sent = s1.pushCalls[0]![0]!;
+    h1.stop();
+
+    const store2 = freshStore();
+    const s2 = makeScriptedAdapter();
+    boot(store2, { adapter: s2.adapter, clientId: "c-durable", outboxEngine: fakeOutboxEngine(rows).engine });
+    await tick(5);
+    const resent = s2.pushCalls.flat();
+    expect(resent).toHaveLength(1);
+    // Same mutationId and seq — the server dedups replays by exactly these.
+    expect(resent[0]!.mutationId).toBe(sent.mutationId);
+    expect(resent[0]!.seq).toBe(sent.seq);
+    expect(resent[0]!.data).toEqual(sent.data);
+  });
+
+  it("a write arriving before the durable-outbox load completes waits for the restored watermark", async () => {
+    // A previous session left the watermark at 7. The engine opens slowly;
+    // the app writes immediately. Without pre-boot buffering the write would
+    // take seq 1 and collide with the previous session's numbering.
+    const rows = new Map<string, unknown>([["outbox-meta:seq", { seq: 7 }]]);
+    const { engine } = fakeOutboxEngine(rows, { openDelayMs: 15 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-early", outboxEngine: engine });
+    localWrite(store, "Widget", "w1", { id: "w1", label: "raced the boot" });
+    await tick(40);
+    expect(scripted.pushCalls[0]![0]!.seq).toBe(8);
+  });
+
+  it("without an outboxEngine, seq restarts at 1 per instance — the documented constraint on reusing a clientId", async () => {
+    // This pins the DOCUMENTED in-memory behavior (EnableSyncOptions.clientId
+    // doc): a stable clientId without a durable outbox means post-reload
+    // writes are seq <= lastSeen server-side. The fix for that hazard is
+    // outboxEngine, not a change to this behavior.
+    const store1 = freshStore();
+    const s1 = makeScriptedAdapter();
+    const h1 = boot(store1, { adapter: s1.adapter, clientId: "stable-client" });
+    localWrite(store1, "Widget", "w1", { id: "w1" });
+    await tick();
+    expect(s1.pushCalls[0]![0]!.seq).toBe(1);
+    h1.stop();
+
+    const store2 = freshStore();
+    const s2 = makeScriptedAdapter();
+    boot(store2, { adapter: s2.adapter, clientId: "stable-client" });
+    localWrite(store2, "Widget", "w2", { id: "w2" });
+    await tick();
+    expect(s2.pushCalls[0]![0]!.seq).toBe(1);
+  });
+});
+
+describe("DAN-777 review round — lifecycle, fault, and boot-window findings", () => {
+  it("B2: stop() during a slow outbox-engine open still closes the engine", async () => {
+    const { engine, closeCount } = fakeOutboxEngine(new Map(), { openDelayMs: 15 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-b2", outboxEngine: engine });
+    handle.stop(); // React strict-mode double-mount shape: stop before open resolves
+    await tick(40);
+    // A leaked engine handle can hold an exclusive OPFS lock and silently
+    // degrade the NEXT instance to in-memory — resurrecting finding A.
+    expect(closeCount()).toBe(1);
+  });
+
+  it("A1: a delta-style confirmation mark arriving before the restore completes still retires the restored entry", async () => {
+    const rows = new Map<string, unknown>();
+    const storeA = freshStore();
+    const sA = makeScriptedAdapter();
+    sA.queuePush(() => new Promise<never>(() => {}));
+    const hA = boot(storeA, { adapter: sA.adapter, clientId: "c-a1", outboxEngine: fakeOutboxEngine(rows).engine });
+    await tick(5);
+    localWrite(storeA, "Widget", "w1", { id: "w1", label: "pending" });
+    await tick();
+    hA.stop();
+    expect([...rows.keys()].some((k) => k.startsWith("outbox-entry:"))).toBe(true);
+
+    // Session 2: engine opens SLOWLY; the boot pull races ahead and delivers
+    // the confirmation mark exactly once (delta-style, Replicache
+    // lastMutationIDChanges — legal under ADR-006), then never again.
+    const storeB = freshStore();
+    const sB = makeScriptedAdapter();
+    sB.queuePull(
+      { type: "changes", changes: [], cursor: "1", complete: true, confirmedMutations: { "c-a1": 1 } },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    const hB = boot(storeB, {
+      adapter: sB.adapter,
+      clientId: "c-a1",
+      outboxEngine: fakeOutboxEngine(rows, { openDelayMs: 20 }).engine,
+    });
+    await tick(60);
+    // The mark's high-water must retire the late-restored entry — otherwise
+    // it re-pushes forever as a ghost.
+    expect(hB.getPendingCount()).toBe(0);
+    expect(sB.pushCalls.flat()).toHaveLength(0);
+    expect([...rows.keys()].some((k) => k.startsWith("outbox-entry:"))).toBe(false);
+  });
+
+  it("A2: a loadAll fault degrades to in-memory WITHOUT clobbering the previous session's rows", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rows = new Map<string, unknown>([
+      ["outbox-meta:seq", { seq: 3 }],
+      [
+        "outbox-entry:3",
+        { mutationId: "m-old", clientId: "c-a2", seq: 3, op: "set", entityType: "Widget", id: "w1", data: { id: "w1" }, previousExisted: false },
+      ],
+    ]);
+    const { engine } = fakeOutboxEngine(rows, { failLoadAll: true });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-a2", outboxEngine: engine });
+    await tick(5);
+    localWrite(store, "Widget", "w2", { id: "w2", label: "post-fault" });
+    await tick();
+    // §1's own requirement: a fault can never destroy unpushed writes. A
+    // half-open engine writing seq-1 keys over the old session's rows does.
+    expect(rows.get("outbox-entry:3")).toMatchObject({ mutationId: "m-old" });
+    expect(rows.has("outbox-entry:1")).toBe(false);
+    expect(rows.get("outbox-meta:seq")).toEqual({ seq: 3 });
+  });
+
+  it("A3: a pull applying during the pre-boot window replays the buffered pending writer", async () => {
+    const { engine } = fakeOutboxEngine(new Map(), { openDelayMs: 25 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-a3", outboxEngine: engine });
+
+    localWrite(store, "Widget", "w1", { id: "w1", label: "buffered edit" }); // engine still opening
+    await tick(1); // let the BOOT pull settle first — a poke racing an in-flight
+    // pull is dropped (pullInFlight), which would make this test pass vacuously
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SERVER" }, version: 5 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(2); // still inside the 25ms boot window
+    // Finding B holds inside the window too: the buffered pending edit stays
+    // visible on top of the applied server value.
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "buffered edit" });
+    await tick(40); // boot completes; entry materializes and pushes normally
+    expect(scripted.pushCalls.flat().some((c) => c.id === "w1")).toBe(true);
+  });
+
+  it("A4: a transform id-remap reaches entries still in the pre-boot buffer", async () => {
+    const { engine } = fakeOutboxEngine(new Map(), { openDelayMs: 25 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    // First push (the adopted sibling entry) gets a transform with an id
+    // remap; every later push is acked.
+    scripted.queuePush(
+      (batch) => ({
+        results: batch.map((c) => ({
+          mutationId: c.mutationId,
+          status: "transform" as const,
+          data: { id: "srv-1", label: "corrected" },
+          version: 1,
+          remappedId: "srv-1",
+        })),
+      }),
+      (batch) => ({ results: batch.map((c) => ({ mutationId: c.mutationId, status: "ack" as const, version: 2 })) }),
+    );
+    boot(store, {
+      adapter: scripted.adapter,
+      clientId: "c-a4",
+      outboxEngine: engine,
+      recoverStrandedOutbox: () => [
+        {
+          mutationId: "m-sib",
+          clientId: "sib-client",
+          seq: 1,
+          op: "set" as const,
+          entityType: "Widget",
+          id: "temp-1",
+          data: { id: "temp-1", label: "sibling write" },
+          previousExisted: false,
+        },
+      ],
+    });
+    // The app's own write to the same temp id, buffered behind the slow open.
+    localWrite(store, "Widget", "temp-1", { id: "temp-1", label: "mine too" });
+    await tick(5); // adoption pushes; the remap lands while the buffer still holds our write
+    await tick(40); // boot completes; buffered entry materializes and pushes
+    const own = scripted.pushCalls.flat().filter((c) => c.clientId === "c-a4");
+    expect(own).toHaveLength(1);
+    // Without the buffer rewrite this ships the dead temp id.
+    expect(own[0]!.id).toBe("srv-1");
+    expect(own[0]!.baseVersion).toBeUndefined();
+  });
+
+  it("A5: a corrupt persisted entry row is skipped instead of poisoning seq to NaN", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const rows = new Map<string, unknown>([
+      ["outbox-meta:seq", { seq: 2 }],
+      ["outbox-entry:9", { garbage: true }],
+    ]);
+    const { engine } = fakeOutboxEngine(rows);
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    boot(store, { adapter: scripted.adapter, clientId: "c-a5", outboxEngine: engine });
+    await tick(5);
+    localWrite(store, "Widget", "w1", { id: "w1" });
+    await tick();
+    expect(scripted.pushCalls[0]![0]!.seq).toBe(3); // numeric, from the watermark — never NaN
+  });
+});
+
+describe("DAN-777 landing gauntlet — the fixes' own siblings", () => {
+  it("G1: a STALE transform carrying a remappedId is judged against the TARGET key's stamp too", async () => {
+    // Landing-gauntlet finding 1: the stale gate consulted only the temp-id
+    // key; a remapped stale transform (temp id has no stamp, server id has a
+    // newer one) sailed through and permanently overwrote the newer state.
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              results: [
+                {
+                  mutationId: batch[0]!.mutationId,
+                  status: "transform" as const,
+                  data: { id: "srv-1", label: "STALE-CORRECTION" },
+                  version: 5,
+                  remappedId: "srv-1",
+                },
+              ],
+            });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+
+    localWrite(store, "Widget", "temp-1", { id: "temp-1", label: "mine" });
+    await tick(); // push in flight, verdict held
+
+    // The server id's state arrives at v10 while the verdict is in flight.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ id: "srv-1", data: { id: "srv-1", label: "TEN" }, version: 10 })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "srv-1").value).toEqual({ id: "srv-1", label: "TEN" });
+
+    release();
+    await tick();
+    // The stale (v5 < v10) correction must not overwrite srv-1's newer state.
+    expect(store.get("Widget", "srv-1").value).toEqual({ id: "srv-1", label: "TEN" });
+  });
+
+  it("G2: a loadAll fault still closes the engine at stop()", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { engine, closeCount } = fakeOutboxEngine(new Map(), { failLoadAll: true });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-g2", outboxEngine: engine });
+    await tick(5); // open succeeded, loadAll threw, degraded to in-memory
+    handle.stop();
+    // The A2 fix protected the ROWS; the handle must still be released, or
+    // its OPFS lock degrades the next instance to in-memory (finding A again).
+    expect(closeCount()).toBe(1);
+  });
+
+  it("G3: stop() while loadAll is in flight closes the engine exactly once", async () => {
+    const { engine, closeCount } = fakeOutboxEngine(new Map(), { loadAllDelayMs: 20 });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-g3", outboxEngine: engine });
+    await tick(2); // open resolved; loadAll pending
+    handle.stop(); // closes here...
+    await tick(40); // ...and the boot's post-loadAll stopped-path must NOT close again
+    expect(closeCount()).toBe(1); // "No calls after close" — src/types.ts StorageEngine contract
+  });
+
+  it("G4: with a custom comparator, a 'concurrent' transform's stamp follows its applied data", async () => {
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    // A comparator that can only say same/concurrent — the CRDT-ish shape D3
+    // exists for. Attached to the scripted adapter's object directly.
+    scripted.adapter.compareVersions = (a, b) => (a === b ? "same" : "concurrent");
+    scripted.queuePull(
+      {
+        type: "changes",
+        changes: [remoteChange({ data: { id: "w1", label: "A" }, version: "vA" })],
+        cursor: "1",
+        complete: true,
+      },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    let release: () => void = () => {};
+    scripted.queuePush(
+      (batch) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              results: [
+                { mutationId: batch[0]!.mutationId, status: "transform" as const, data: { id: "w1", label: "CORRECTED" }, version: "vB" },
+              ],
+            });
+        }),
+    );
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    await tick();
+    localWrite(store, "Widget", "w1", { id: "w1", label: "LOCAL" });
+    await tick();
+
+    release();
+    await tick(); // "concurrent" transform: data IS applied (§3 posture) → stamp must follow to vB
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "CORRECTED" });
+
+    // The probe: the server's echo of vB must classify "same" and be skipped.
+    // A stamp left at vA classifies the echo "concurrent" and re-applies it.
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "ECHO" }, version: "vB" })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick();
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "CORRECTED" });
+  });
+});
+
+describe("DAN-777 CodeRabbit round — fault-path seq collision, write ordering, comparator pins", () => {
+  it("R1: a loadAll fault SUSPENDS pushes — never pushes virgin seqs a previous session already burned", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    // A previous session reached seq 7; this session cannot learn that
+    // (loadAll faults), so pushing seq 1,2,3… means the server silently
+    // ignores every write — finding A's exact hazard, resurrected on the
+    // fault path. Visibly stuck beats silently ignored (D9's doctrine).
+    const rows = new Map<string, unknown>([["outbox-meta:seq", { seq: 7 }]]);
+    const { engine } = fakeOutboxEngine(rows, { failLoadAll: true });
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-r1", outboxEngine: engine });
+    await tick(5);
+    localWrite(store, "Widget", "w1", { id: "w1", label: "must not collide" });
+    await tick(10);
+    expect(scripted.pushCalls).toHaveLength(0); // nothing rides a colliding seq
+    expect(handle.getPendingCount()).toBe(1); // the write is visibly stuck, not hidden
+    expect(handle.getRetryState().suspendedForOutboxFault).toBe(true); // and the app can see why
+  });
+
+  it("R2: entry persist and retire are ordered — a fast retire cannot resurrect its own entry's row", async () => {
+    // StorageEngine guarantees atomicity per batch, not ordering BETWEEN
+    // fire-and-forget batches. A delete resolving before the earlier put for
+    // the same key re-creates a retired row, which re-pushes as a ghost on
+    // the next boot. The engine below resolves the put SLOWLY and the delete
+    // instantly — reversed completion order.
+    const rows = new Map<string, unknown>();
+    let firstPut = true;
+    const engine: StorageEngine = {
+      isSupported: () => true,
+      async open() {},
+      async loadAll() {
+        return [...rows.entries()].map(([key, data]) => ({ key: key as EntityKey, data }));
+      },
+      async loadMany() {
+        return [];
+      },
+      async writeBatch(puts, deletes) {
+        const slow = puts.length > 0 && firstPut;
+        if (slow) firstPut = false;
+        if (slow) await new Promise((r) => setTimeout(r, 15)); // the put lags
+        for (const p of puts) rows.set(p.key, p.value);
+        for (const d of deletes) rows.delete(d);
+      },
+      close() {},
+    };
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    const handle = boot(store, { adapter: scripted.adapter, clientId: "c-r2", outboxEngine: engine });
+    await tick(2);
+    localWrite(store, "Widget", "w1", { id: "w1", label: "quick round trip" });
+    await tick(); // pushed + acked
+    scripted.queuePull({ type: "changes", changes: [], cursor: "1", complete: true, confirmedMutations: { "c-r2": 1 } });
+    scripted.emitLive({ type: "poke" });
+    await tick(); // confirmed → retire delete issued while the put is still pending
+    await tick(30); // let the slow put land
+    expect(handle.getPendingCount()).toBe(0);
+    // Serialized writes: the delete ran AFTER the put — no resurrected row.
+    expect([...rows.keys()].filter((k) => k.startsWith("outbox-entry:"))).toEqual([]);
+  });
+
+  it("R3: with a same/concurrent comparator, an ack does not stamp — the echo re-applies idempotently and then pins", async () => {
+    // Policy pin (CodeRabbit thread): an ack carries no data, so stamping its
+    // unranked version would claim store contents the store does not hold.
+    // The cost is one idempotent re-apply of the echo — after which
+    // applyRemoteChange stamps, and the SECOND echo classifies "same".
+    const store = freshStore();
+    const scripted = makeScriptedAdapter();
+    scripted.adapter.compareVersions = (a, b) => (a === b ? "same" : "concurrent");
+    scripted.queuePull(
+      {
+        type: "changes",
+        changes: [remoteChange({ data: { id: "w1", label: "A" }, version: "vA" })],
+        cursor: "1",
+        complete: true,
+      },
+      { type: "changes", changes: [], cursor: "1", complete: true },
+    );
+    scripted.queuePush((batch) => ({
+      results: batch.map((c) => ({ mutationId: c.mutationId, status: "ack" as const, version: "vB" })),
+    }));
+    boot(store, { adapter: scripted.adapter, clientId: "client-a" });
+    await tick();
+    localWrite(store, "Widget", "w1", { id: "w1", label: "LOCAL" });
+    await tick(); // acked @vB — deliberately NOT stamped
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "ECHO" }, version: "vB" })],
+      cursor: "2",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(); // "concurrent" vs vA → applies (correct §3 posture), stamps vB
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "ECHO" });
+
+    scripted.queuePull({
+      type: "changes",
+      changes: [remoteChange({ data: { id: "w1", label: "SECOND-ECHO" }, version: "vB" })],
+      cursor: "3",
+      complete: true,
+    });
+    scripted.emitLive({ type: "poke" });
+    await tick(); // "same" vs vB → skipped: converged, no livelock
+    expect(store.get("Widget", "w1").value).toEqual({ id: "w1", label: "ECHO" });
   });
 });

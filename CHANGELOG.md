@@ -10,6 +10,80 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **The durable outbox (ADR-006 §1) and the pull-apply sibling replay — the two deliberate
+  deferrals from DAN-776's landing review, closed (DAN-777).**
+
+  **Finding A — the durable outbox.** `EnableSyncOptions.outboxEngine?: StorageEngine` takes a
+  SEPARATE engine instance (its own file/store, e.g. `idbEngine({ dbName: "cdb_outbox" })` —
+  §1's requirement that a state reset can never destroy unpushed writes). Outbox entries and a
+  per-client `seq` watermark are persisted at commit time and restored on boot: pending pushes
+  survive reloads and are relayed with identical `mutationId`/`seq` (never re-authored), and
+  `seq` never regresses — the watermark is its own row rather than derived from surviving
+  entries, because confirmed entries are deleted and re-issuing their seqs would be silently
+  ignored server-side (the exact post-reload write-loss hazard finding A names). Writes racing
+  the async boot-load are buffered with everything captured at commit time (mutationId, auth,
+  previousData — D4's law) except `seq`, which waits for the restored watermark. Persistence
+  failures degrade gracefully to in-memory with one warning. Without `outboxEngine` the old
+  behavior stands and is now loudly documented on `clientId` (a stable clientId requires the
+  durable outbox) — and pinned by a test.
+
+  **Finding B — pull-apply replays still-pending same-key writers**, completing the trio:
+  `reject` and `transform` already replayed; a pull-applied remote change now does too, inside
+  the same `sync-pull` write channel (no echo, no new outbox entries). Pending optimistic edits
+  no longer visibly vanish until the push echo returns. Two pre-existing tests pinned the old
+  vanishing behavior mid-flight and were updated to pin the new one — their final
+  divergence-prevention assertions are unchanged. Related, same family: `ack`/`transform`
+  version stamps now route through a guarded stamp that never regresses a newer pull's stamp
+  (push and pull overlap by design, D17 — an unconditional stamp let a late verdict's older
+  version misclassify the next pull as "older"/"same").
+
+  Six mechanisms watched to fail (mutation → named test red → revert): the pull-apply replay,
+  both guarded stamps, watermark restore, entry persistence, and the pre-boot buffer. Suite
+  630 → 637.
+
+  **A fresh-context review round then found 7 more, all fixed here with red-first tests
+  (suite → 643):** the serious one was the residual half of the stamp guard itself — a STALE
+  transform's *data* still applied unconditionally, and with the stamp correctly kept newer,
+  the divergence became permanent (re-delivery classifies "same" and can never heal; the
+  initial stamp test had even pinned the divergent value as expected). Stale transforms now
+  skip the data apply and sibling replay while still applying the id remap (identity is not
+  versioned). Also fixed: `stop()` during a slow engine `open()` leaked the handle (an OPFS
+  lock held by the leak degrades the *next* instance to in-memory — resurrecting the exact
+  finding-A hazard); a `loadAll` fault left the engine writable, clobbering the previous
+  session's rows with fresh seq-1 keys (now degrades to pure in-memory); a delta-style
+  confirmation mark arriving before the restore/adoption completed left a ghost entry
+  re-pushing forever (a per-client high-water mark now retires late-restored entries);
+  finding B and id-remaps now reach writes still buffered behind the boot window; one corrupt
+  persisted row no longer poisons `seqCounter` to NaN; and `getPendingCount()` counts
+  buffered pre-boot writes.
+
+  **The landing gauntlet then found the fixes' own siblings — 3 blockers + 1 advisory, all
+  fixed red-first (suite → 647):** the stale-transform gate consulted only the temp-id key, so
+  a stale transform carrying a `remappedId` (temp id unstamped, target id stamped newer by a
+  mid-flight pull) still overwrote the newer state permanently — the gate now checks both
+  keys; the loadAll-fault fix flipped the open flag without closing, leaking the very handle
+  whose OPFS lock the lifecycle fix exists to release — close-ownership now routes through one
+  helper with split open/writable flags, which also fixed a stop-during-loadAll double-close
+  (the StorageEngine contract forbids calls after close); and with a custom comparator, a
+  "concurrent" transform applied its data but left the stamp behind, so the server's echo
+  re-applied forever — the stamp now follows applied data. Known limitation, by design: entry
+  retirement is a fire-and-forget delete, so a crash in the window between a once-only
+  delta-style confirmation mark and the delete completing can leave a row that re-pushes as a
+  ghost on the next boot; wire-protocol-v1's every-response marks make this unreachable for
+  the shipped stack.
+
+  **A fourth round (CodeRabbit's PR review) added two real fixes + one policy pin (suite →
+  650):** a `loadAll` fault now SUSPENDS pushes (surfaced via
+  `RetryState.suspendedForOutboxFault`) instead of materializing buffered writes at virgin
+  seqs a previous session already burned — the server silently ignores `seq <= lastSeen`, so
+  the fault path had quietly resurrected finding A; all engine writes now ride one serialized
+  tail, because `StorageEngine.writeBatch` guarantees atomicity per batch but not ordering
+  *between* fire-and-forget batches (a fast retire delete could resurrect its own entry's
+  slower put as a ghost row); and the ack-doesn't-stamp policy under a same/concurrent
+  comparator is pinned by a test (one idempotent echo re-apply, then converged). The reload
+  tests also now use a fresh engine instance per session — the contract forbids calls after
+  `close()`.
+
 - **`restAdapter` — the first real `SyncAdapter`, and the first time Stage 3 speaks HTTP end to
   end.** `src/rest-adapter.ts` is the client half of wire protocol v1 (DAN-780): it `POST`s the
   §7 bodies to `WIRE_PULL_PATH`/`WIRE_PUSH_PATH` (cursor in the body, never the URL — §2/C5),
