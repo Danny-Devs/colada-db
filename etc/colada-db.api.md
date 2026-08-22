@@ -142,12 +142,20 @@ declare function denormalize(data: unknown, store: EntityStore, cache?: Map<stri
   entity: EntityRecord;
   result: unknown;
 }>): unknown;
+type DegradationReason = "format-version-newer" | "matcher-view-foreign-boundary" | (string & {});
+interface DegradationEvent {
+  readonly reason: DegradationReason;
+  readonly message: string;
+  readonly detail?: Readonly<Record<string, unknown>>;
+}
+type DegradationHandler = (event: DegradationEvent) => void;
 interface PersistenceOptions {
   engine?: StorageEngine;
   dbName?: string;
   writeDebounce?: number;
   onReady?: () => void;
   onError?: (error: unknown) => void;
+  onDegraded?: DegradationHandler;
   requestDurable?: boolean;
   hydration?: "all" | "manifest";
 }
@@ -324,9 +332,11 @@ interface MatcherViewDivergence {
 interface MatcherViewOptions {
   verifyIntegrity?: boolean;
   onDivergence?: (divergence: MatcherViewDivergence) => void;
+  onDegraded?: DegradationHandler;
 }
 interface MatcherView {
   readonly tier: MatcherViewTier;
+  readonly retained: boolean;
   getMembers(): readonly string[];
   has(id: string): boolean;
   subscribe(listener: () => void): () => void;
@@ -406,7 +416,7 @@ interface RelayPaginationOptions {
   dedupeByCursor?: boolean;
 }
 declare function relayPagination<T extends EntityRecord = EntityRecord>(options?: RelayPaginationOptions): (existing: T, incoming: T) => T;
-export { type ColadaDbSchema, type ColadaRef, type CursorPaginationOptions, ENTITY_REF_MARKER, type EntityDefinition, type EntityEvent, type EntityKey, type EntityRecord, type EntityRef, type EntityRegistry, type EntityStore, type ExportedEntitySchema, type ExportedField, type ExportedRelation, type GateVerdict, type HistoryEntry, type HistoryOptions, type HistoryStore, type IdbEngineOptions, M, MATCHER_MAX_COST, MATCHER_MAX_DEPTH, MATCHER_MAX_LIST_LENGTH, type MatcherClassification, type MatcherComparisonNode, type MatcherExistsNode, type MatcherGroupNode, type MatcherListNode, type MatcherNode, type MatcherNotNode, type MatcherOrderedNode, type MatcherOrderedScalar, type MatcherParseCode, MatcherParseError, type MatcherPredicate, type MatcherScalar, type MatcherView, type MatcherViewDivergence, MatcherViewError, type MatcherViewFilter, type MatcherViewOptions, type MatcherViewTier, type MemoryEngine, type NormalizationResult, type OffsetPaginationOptions, type OptimisticTransaction, type OptimisticUpdates, type PersistenceHandle, type PersistenceOptions, type PolicyGate, PolicyVetoError, type ProposedWrite, type RelayConnection, type RelayEdge, type RelayPageInfo, type RelayPaginationOptions, type ResolveEntity, type SqliteEngine, type SqliteEngineOptions, type StorageEngine, type StoreBoundary, type TransactionSettledEvent, type WriteMeta, type WriteOrigin, classifyFilter, createCoalescer, createEntityStore, createMatcherView, createOptimisticUpdates, createStoreBoundary, createWriteIdGenerator, cursorPagination, defineEntity, denormalize, enableHistory, enablePersistence, evaluateMatcher, exportSchema, idbEngine, memoryEngine, normalize, offsetPagination, parseMatcher, relayPagination, serializeMatcher, splitEntityKey, sqliteEngine, writeEntitiesToStore };
+export { type ColadaDbSchema, type ColadaRef, type CursorPaginationOptions, type DegradationEvent, type DegradationHandler, type DegradationReason, ENTITY_REF_MARKER, type EntityDefinition, type EntityEvent, type EntityKey, type EntityRecord, type EntityRef, type EntityRegistry, type EntityStore, type ExportedEntitySchema, type ExportedField, type ExportedRelation, type GateVerdict, type HistoryEntry, type HistoryOptions, type HistoryStore, type IdbEngineOptions, M, MATCHER_MAX_COST, MATCHER_MAX_DEPTH, MATCHER_MAX_LIST_LENGTH, type MatcherClassification, type MatcherComparisonNode, type MatcherExistsNode, type MatcherGroupNode, type MatcherListNode, type MatcherNode, type MatcherNotNode, type MatcherOrderedNode, type MatcherOrderedScalar, type MatcherParseCode, MatcherParseError, type MatcherPredicate, type MatcherScalar, type MatcherView, type MatcherViewDivergence, MatcherViewError, type MatcherViewFilter, type MatcherViewOptions, type MatcherViewTier, type MemoryEngine, type NormalizationResult, type OffsetPaginationOptions, type OptimisticTransaction, type OptimisticUpdates, type PersistenceHandle, type PersistenceOptions, type PolicyGate, PolicyVetoError, type ProposedWrite, type RelayConnection, type RelayEdge, type RelayPageInfo, type RelayPaginationOptions, type ResolveEntity, type SqliteEngine, type SqliteEngineOptions, type StorageEngine, type StoreBoundary, type TransactionSettledEvent, type WriteMeta, type WriteOrigin, classifyFilter, createCoalescer, createEntityStore, createMatcherView, createOptimisticUpdates, createStoreBoundary, createWriteIdGenerator, cursorPagination, defineEntity, denormalize, enableHistory, enablePersistence, evaluateMatcher, exportSchema, idbEngine, memoryEngine, normalize, offsetPagination, parseMatcher, relayPagination, serializeMatcher, splitEntityKey, sqliteEngine, writeEntitiesToStore };
 ```
 
 ## `dist/sqlite-worker.d.mts`

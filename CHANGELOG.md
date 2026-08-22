@@ -360,6 +360,38 @@ than this file's older `[feat]`/`[fix]` tags.
   is a bug or a misconfiguration. The feature form asks whether the proposal
   crosses an ADR-022 irreversibility line. `.editorconfig` and `.nvmrc` too.
 
+- **A degradation channel that works where `process` and `console` do not — `onDegraded`
+  and `MatcherView.retained` (DAN-659, ADR-026).**
+
+  colada-db degrades rather than failing, which means a degraded database looks exactly
+  like an empty one unless you ask. Three of the five degradation paths were already
+  answerable in any runtime (`onError` twice, the `engine.persistent` getter once). Two
+  spoke only through `console.warn`, behind the `process.env.NODE_ENV` guard — so in a CDN
+  or `<script type="module">` page, where `process` does not exist and the guard evaluates
+  false, a database written by a newer build and a matcher view that had lost gc pinning
+  were both completely silent.
+
+  Both now also report through `onDegraded`, a callback you supply on `PersistenceOptions`
+  and `MatcherViewOptions`. It needs nothing from the host — no `process`, no `console`, no
+  bundler — and the same handler can observe persistence and every view at once. Each event
+  carries a stable `reason` you can branch on (`"format-version-newer"`,
+  `"matcher-view-foreign-boundary"`) plus structured `detail`; `message` is for humans and
+  may be reworded. The vocabulary is deliberately open, so a code your copy predates is a
+  value you already handle rather than a breaking change later.
+
+  Matcher views additionally expose `view.retained: boolean`. That condition is settled
+  synchronously before `createMatcherView` returns, so a flag can never be missed by
+  someone holding the view — see ADR-026 for why both shapes ship rather than one.
+
+  The dev `console.warn`s are untouched, and so is the DAN-649 strippability pin: this adds
+  a channel, it does not move one. The regressions in `src/degradation-channels.spec.ts`
+  delete `globalThis.process` outright and blind `console`, each with a positive control
+  proving the harness really removed them — "the handler fired" passes against the broken
+  code too, because a test runner always has both.
+
+  The playground harness now asserts `A0b · no silent degradation`, so a durability
+  measurement standing on an unreported caveat fails visibly instead of reading as a pass.
+
 ### Changed
 
 - **ADR-006 rev d — the sync-adapter contract now says one thing per question.**

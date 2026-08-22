@@ -79,6 +79,11 @@ export type {
   MatcherParseCode,
 } from "./matcher";
 
+// ─── Degradation channel (runtime-independent observability, DAN-659) ───
+// Type-only: the emitter is internal. A consumer supplies the handler, so the
+// channel needs no `process`, no `console` and no bundler to work.
+export type { DegradationReason, DegradationEvent, DegradationHandler } from "./degradation";
+
 // ─── Live matcher views (two-tier reactive membership, DAN-606) ───
 export { createMatcherView, MatcherViewError } from "./matcher-view";
 export type {

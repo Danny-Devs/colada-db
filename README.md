@@ -83,6 +83,53 @@ const entityDefs = {
 
 Each definition must be able to *recognize* its own records: definitions are tried in order and the first match wins, so several types sharing a plain `idField: "id"` would all claim the same record. `getId` returning `null` is how a definition declines.
 
+## Observing degradation
+
+colada-db is built never to crash your app over storage. OPFS is unavailable outside a secure
+context, a quota is exhausted, the database on disk was written by a newer build — in each case it
+degrades and keeps going. The cost of that posture is that **a degraded database looks exactly like
+an empty one** unless you ask.
+
+Three channels answer that, and between them they cover every degradation path:
+
+```ts
+const engine = idbEngine();
+const handle = enablePersistence(store, {
+  engine,
+  // Persistence has been DISABLED — the engine failed to open, or a write failed.
+  onError: (err) => reportToSentry(err),
+  // Persistence is still RUNNING, under a caveat worth knowing about.
+  onDegraded: (e) => {
+    if (e.reason === "format-version-newer") {
+      banner("This app was updated in another tab — reload to read your data correctly.");
+    }
+  },
+});
+await handle.ready;
+
+// Is the data actually landing on disk? Ask the engine, any time.
+if (engine.persistent !== true) banner("Running in memory only — changes will not survive a reload.");
+```
+
+Matcher views take the same handler, and additionally expose the fact as pollable state:
+
+```ts
+const view = createMatcherView(boundary, "contact", M.eq("status", "active"), {
+  onDegraded: (e) => reportToSentry(e),
+});
+view.retained; // false → a foreign boundary; membership is still correct, gc pinning is not
+```
+
+Every `reason` is a **stable string** you can branch on, and the set is open — treat an unrecognized
+one as a degradation your copy of the library predates, exactly as the format-version policy treats
+a database it predates. `message` is for humans and may be reworded in any release; anything a
+program needs is in `detail`.
+
+**Pass these if you load colada-db from a CDN or a plain `<script type="module">`.** The dev-mode
+`console.warn`s beside them are stripped from production bundles and are guarded on `process`, which
+does not exist in those runtimes — `onDegraded` is a callback you supply, so it is the only one of
+the three that needs nothing from the host at all.
+
 ## The design
 
 - **Normalized entity graph, synchronous reads.** Every entity lives once. Reads are synchronous reactive refs from an in-memory projection — the UI never awaits the database.

@@ -46,6 +46,7 @@
  */
 
 import { resolveBoundaryStore, type StoreBoundary } from "./boundary";
+import { emitDegradation, type DegradationHandler } from "./degradation";
 import { classifyFilter, evaluateMatcher } from "./matcher";
 import type { EntityEvent, EntityRecord } from "./types";
 
@@ -97,6 +98,23 @@ export interface MatcherViewOptions {
   verifyIntegrity?: boolean;
   /** Where divergence reports go. @default console.error */
   onDivergence?: (divergence: MatcherViewDivergence) => void;
+  /**
+   * Called when the view is created under a caveat rather than fully
+   * functional (DAN-659). Today the only matcher-view reason is
+   * `"matcher-view-foreign-boundary"`.
+   *
+   * Fires SYNCHRONOUSLY during `createMatcherView`, before it returns — the
+   * condition is settled at construction — so a handler passed here always
+   * sees it. Unlike the `console.warn` beside it this needs no `process`, no
+   * `console` and no bundler, which is the whole point: pass the same handler
+   * here and to `enablePersistence` and one function observes every
+   * degradation in the library.
+   *
+   * For this particular reason {@link MatcherView.retained} carries the same
+   * fact as pollable state. Use the flag when you want to ask; use this when
+   * you want to be told.
+   */
+  onDegraded?: DegradationHandler;
 }
 
 /**
@@ -108,6 +126,19 @@ export interface MatcherViewOptions {
 export interface MatcherView {
   /** Which maintenance tier this view runs on (fixed at creation). */
   readonly tier: MatcherViewTier;
+  /**
+   * Whether this view pins its members against gc sweeps (ADR-010). `true`
+   * for any boundary from `createStoreBoundary`; `false` when the boundary is
+   * a foreign implementation whose store cannot be resolved, in which case
+   * membership is still CORRECT but entities may be swept out from under it.
+   *
+   * Fixed at creation and pollable at any time (DAN-659) — the flag half of
+   * the same fact {@link MatcherViewOptions.onDegraded} reports as an event.
+   * A flag is the right primitive here precisely because the condition is
+   * settled synchronously before the view exists: there is no moment at which
+   * a consumer holding the view could have missed it.
+   */
+  readonly retained: boolean;
   /**
    * Current member ids. SAME array instance while membership is
    * unchanged; each membership change mints one new array. Row edits
@@ -176,7 +207,7 @@ export function createMatcherView(
   filter: MatcherViewFilter,
   options: MatcherViewOptions = {},
 ): MatcherView {
-  const { verifyIntegrity = false, onDivergence } = options;
+  const { verifyIntegrity = false, onDivergence, onDegraded } = options;
 
   // ── Classify (once, at creation) ───────────
   let tier: MatcherViewTier;
@@ -210,12 +241,24 @@ export function createMatcherView(
 
   // ── Retention wiring (ADR-010: a view = a retaining scope) ──
   const store = resolveBoundaryStore(boundary);
-  if (!store && typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production") {
-    console.warn(
+  const retained = store !== undefined;
+  if (!retained) {
+    // Two channels (DAN-659): the console.warn keeps dev ergonomics inside the
+    // DAN-649 strippable guard, and `onDegraded` fires unconditionally so the
+    // same fact reaches a runtime with no `process` and no `console` — which is
+    // where a framework-free page silently lost gc pinning.
+    const message =
       "[colada-db] matcher-view: boundary has no resolvable store " +
-        "(foreign StoreBoundary implementation?) — members will not be " +
-        "retained against gc sweeps.",
-    );
+      "(foreign StoreBoundary implementation?) — members will not be " +
+      "retained against gc sweeps.";
+    if (typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production") {
+      console.warn(message);
+    }
+    emitDegradation(onDegraded, {
+      reason: "matcher-view-foreign-boundary",
+      message,
+      detail: { entityType },
+    });
   }
   const retain = (id: string): void => store?.retain(entityType, id);
   const release = (id: string): void => store?.release(entityType, id);
@@ -365,6 +408,7 @@ export function createMatcherView(
   // ── Public handle ──────────────────────────
   return {
     tier,
+    retained,
     getMembers() {
       return members;
     },

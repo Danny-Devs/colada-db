@@ -21,6 +21,7 @@ import type { EntityKey, EntityRecord, EntityStore, StorageEngine } from "./type
 import { encodeEntityRefs, decodeEntityRefs } from "./store";
 import { idbEngine } from "./engines/idb";
 import { createOptimisticUpdates, type TransactionSettledEvent } from "./transactions";
+import { emitDegradation, type DegradationHandler } from "./degradation";
 
 // ─────────────────────────────────────────────
 // Types
@@ -101,6 +102,21 @@ export interface PersistenceOptions {
   onReady?: () => void;
   /** Called when persistence degrades (engine failure, quota). */
   onError?: (error: unknown) => void;
+  /**
+   * Called when persistence degrades in a way that is NOT a failure — the
+   * database is still usable, but something a program may want to act on has
+   * changed (DAN-659).
+   *
+   * Distinct from {@link PersistenceOptions.onError}, which reports that
+   * persistence has been DISABLED. `onDegraded` reports that it is still
+   * running under a caveat. Today the only persistence-side reason is
+   * `"format-version-newer"`.
+   *
+   * Unlike the dev-mode `console.warn` beside it, this fires in EVERY runtime —
+   * no `process`, no bundler, no `console` required. Pass it from a
+   * framework-free page and degradation stops being invisible there.
+   */
+  onDegraded?: DegradationHandler;
   /**
    * Ask the browser to protect this origin's storage from automatic
    * eviction under disk pressure (`navigator.storage.persist()`). The real
@@ -243,6 +259,7 @@ export function enablePersistence(
     writeDebounce = 100,
     onReady,
     onError,
+    onDegraded,
     requestDurable = false,
     hydration = "all",
   } = options;
@@ -322,7 +339,7 @@ export function enablePersistence(
   // While false, the next flush that writes anything stamps it (see flush).
   let indexPersisted = false;
   let gcTimer: ReturnType<typeof setTimeout> | null = null;
-  let formatVersionWarned = false; // ADR-018: warn-on-newer fires at most once
+  let formatVersionReported = false; // ADR-018: newer-than-known is reported at most once
 
   // ── Environment guard (SSR etc.) ───────────
   if (!engine.isSupported()) {
@@ -684,21 +701,38 @@ export function enablePersistence(
   /**
    * Inspect a booted index row's `formatVersion` (ADR-018). Absent → treat as
    * v1, proceed silently. Equal → normal. Higher than this build knows →
-   * `console.warn` once and proceed (forward-tolerant; never crash). No
-   * migration is performed — this is purely the escape hatch.
+   * report once and proceed (forward-tolerant; never crash). No migration is
+   * performed — this is purely the escape hatch.
+   *
+   * Two channels, on purpose (DAN-659). `console.warn` keeps the dev
+   * ergonomics and stays inside the DAN-649 strippable guard, so it costs a
+   * bundler consumer nothing in production. `onDegraded` fires unconditionally
+   * — it is the half that survives a runtime with no `process` and no
+   * `console`, which is where this warning was previously silent.
+   *
+   * The message is built once and shared. That does mean the string now ships
+   * to production instead of being dead-code-eliminated: it is a field of a
+   * public event, not a dev diagnostic, so it has to. Duplicating it to keep
+   * the old one strippable would buy a few hundred bytes and guarantee the two
+   * texts drift.
    */
   function checkFormatVersion(row: ManifestIndexRow): void {
     const fv = row.formatVersion;
     if (fv === undefined) return; // pre-versioned / unversioned → v1
-    if (fv > CDB_FORMAT_VERSION && !formatVersionWarned) {
-      formatVersionWarned = true;
+    if (fv > CDB_FORMAT_VERSION && !formatVersionReported) {
+      formatVersionReported = true;
+      const message =
+        `[cdb-persist] Persisted format version ${fv} is newer than this build supports ` +
+        `(${CDB_FORMAT_VERSION}). Reading anyway — data written by the newer version may not ` +
+        `hydrate correctly. Upgrade colada-db.`;
       if (typeof process !== "undefined" && process.env && process.env.NODE_ENV !== "production") {
-        console.warn(
-          `[cdb-persist] Persisted format version ${fv} is newer than this build supports ` +
-            `(${CDB_FORMAT_VERSION}). Reading anyway — data written by the newer version may not ` +
-            `hydrate correctly. Upgrade colada-db.`,
-        );
+        console.warn(message);
       }
+      emitDegradation(onDegraded, {
+        reason: "format-version-newer",
+        message,
+        detail: { found: fv, supported: CDB_FORMAT_VERSION },
+      });
     }
   }
 

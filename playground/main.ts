@@ -12,7 +12,7 @@
  * #status.done-pass|done-fail for the driving agent.
  */
 import { createEntityStore, enablePersistence, sqliteEngine } from "../src/index";
-import type { EntityKey, PersistenceHandle } from "../src/index";
+import type { DegradationEvent, EntityKey, PersistenceHandle } from "../src/index";
 
 const TOTAL = 10_000;
 const SCOPES = 20;
@@ -55,11 +55,28 @@ async function phaseA_seed(): Promise<void> {
   status("Phase A — seeding 10,000 entities…");
   const engine = makeEngine();
   const store = createEntityStore();
-  const handle = enablePersistence(store, { engine, writeDebounce: 50 });
+  // DAN-659: this page is the framework-free consumer the degradation channel
+  // exists for. It has no bundler and no `process`, so the dev console.warns
+  // are dead here — `onDegraded` is the only channel that reports at all, and a
+  // harness that measured a "durable" run under a silent caveat would be
+  // measuring the wrong thing.
+  const degradations: DegradationEvent[] = [];
+  const handle = enablePersistence(store, {
+    engine,
+    writeDebounce: 50,
+    onDegraded: (e) => degradations.push(e),
+  });
   await handle.ready;
 
   const persistent = (engine as { persistent: boolean | null }).persistent;
   report("A0 · OPFS is real", persistent === true, `engine.persistent = ${persistent} (must be true — otherwise this run proves nothing durable)`);
+  report(
+    "A0b · no silent degradation",
+    degradations.length === 0,
+    degradations.length === 0
+      ? "onDegraded reported nothing — this run is not standing on a caveat"
+      : `onDegraded reported: ${degradations.map((d) => d.reason).join(", ")}`,
+  );
 
   // Idempotent re-run: wipe previous state (entities via clear, manifests explicitly)
   for (let s = 0; s < SCOPES; s++) handle.removeManifest(`scope-${s}`);
