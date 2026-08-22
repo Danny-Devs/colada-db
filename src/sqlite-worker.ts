@@ -18,6 +18,7 @@
 
 import type { SqliteWorkerRequest, SqliteWorkerResponse } from "./engines/sqlite-protocol";
 import {
+  applyCacheSize,
   initSchema,
   loadAllRows,
   loadManyRows,
@@ -30,7 +31,11 @@ interface WorkerState {
   persistent: boolean;
 }
 
-async function handleOpen(state: WorkerState, dbName: string): Promise<{ persistent: boolean }> {
+async function handleOpen(
+  state: WorkerState,
+  dbName: string,
+  cacheSize?: number,
+): Promise<{ persistent: boolean; cacheSize: number | null }> {
   // Dynamic import: resolved and bundled by the APP's bundler because this
   // module runs inside an app-created worker. Optional peer dependency —
   // apps that never use sqliteEngine never pay for it.
@@ -49,8 +54,14 @@ async function handleOpen(state: WorkerState, dbName: string): Promise<{ persist
     state.persistent = false;
   }
 
+  // Page cache before any schema work. `cache_size` is per-connection and
+  // is NOT stored in the file, so every open must set it or silently
+  // inherit the build default. The value reported back is read from the
+  // connection, never echoed from the request — see applyCacheSize.
+  const effectiveCacheSize = applyCacheSize(state.db, cacheSize);
+
   initSchema(state.db);
-  return { persistent: state.persistent };
+  return { persistent: state.persistent, cacheSize: effectiveCacheSize };
 }
 
 /**
@@ -67,8 +78,8 @@ export function runSqliteWorker(): void {
 
     try {
       if (op === "open") {
-        const { dbName } = args as { dbName: string };
-        respond({ ok: true, result: await handleOpen(state, dbName) });
+        const { dbName, cacheSize } = args as { dbName: string; cacheSize?: number };
+        respond({ ok: true, result: await handleOpen(state, dbName, cacheSize) });
       } else if (op === "loadAll") {
         if (!state.db) throw new Error("DB not open");
         respond({ ok: true, result: loadAllRows(state.db) });

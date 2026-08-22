@@ -121,6 +121,30 @@ function makeIdbEngine(): StorageEngine {
   return idbEngine({ dbName: "cdb_browser_lane" });
 }
 
+/**
+ * DAN-926 / ADR-027. The Node specs cover two seams — the pure SQL function
+ * against real sqlite-wasm, and the main-thread protocol against a fake
+ * worker. Neither exercises the REAL worker applying the pragma over real
+ * OPFS, which is the seam a wiring mistake would hide in. This probe is
+ * that third seam.
+ *
+ * It returns what the connection REPORTED, never what was requested.
+ */
+async function cacheProbe(cacheSize?: number): Promise<{
+  persistent: boolean | null;
+  cacheSize: number | null;
+}> {
+  const engine = sqliteEngine({
+    worker: () => new Worker(new URL("./sqlite.worker.ts", import.meta.url), { type: "module" }),
+    dbName: "cdb_browser_lane.sqlite3",
+    cacheSize,
+  });
+  await engine.open();
+  const observed = { persistent: engine.persistent, cacheSize: engine.cacheSize };
+  engine.close();
+  return observed;
+}
+
 const api = {
   expectedWhenIso: WHEN_ISO,
   idb: {
@@ -130,6 +154,7 @@ const api = {
   sqlite: {
     seed: () => seed(makeSqliteEngine()),
     verify: () => verify(makeSqliteEngine()),
+    cacheProbe: (cacheSize?: number) => cacheProbe(cacheSize),
   },
 };
 

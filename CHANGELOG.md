@@ -10,6 +10,27 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **`sqliteEngine` can now be told how much page cache to use, and will tell you what it
+  actually got (DAN-926, ADR-027).**
+
+  `SqliteEngineOptions.cacheSize` applies `PRAGMA cache_size` at open, in SQLite's own sign
+  convention passed through unchanged — negative is KiB, positive is pages. `SqliteEngine.cacheSize`
+  reports the value read back **from the connection**, not the value that was requested.
+
+  This exists because a measured invariant had no way to be obeyed. Benchmarking a `vec0` vector
+  corpus found a **59× steady-state regression** at 100,000 vectors on the default cache (1731 ms
+  p95 against 29 ms tuned), with the cliff appearing between 10,000 and 25,000 vectors — and the
+  conclusion "set `cache_size` explicitly" named an action no API made possible.
+
+  **The default is deliberately unchanged.** That measurement covers a vector corpus, not the JSON
+  entity table this engine ships, and a large page cache is real resident memory on a phone. ADR-027
+  records the reasoning so it does not get "fixed" later by someone re-reading the benchmark.
+
+  Reading the value back is a durability property rather than a convenience: an app bundles
+  `colada-db/sqlite-worker` itself, so a worker older than its `colada-db` will accept an `open`
+  and silently drop the option. In that case `cacheSize` reads `null` — unknown — instead of
+  reporting a setting that was never applied.
+
 - **The durable outbox (ADR-006 §1) and the pull-apply sibling replay — the two deliberate
   deferrals from DAN-776's landing review, closed (DAN-777).**
 

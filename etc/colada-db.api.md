@@ -186,9 +186,11 @@ declare function memoryEngine(): MemoryEngine;
 interface SqliteEngineOptions {
   worker: Worker | (() => Worker);
   dbName?: string;
+  cacheSize?: number;
 }
 interface SqliteEngine extends StorageEngine {
   readonly persistent: boolean | null;
+  readonly cacheSize: number | null;
 }
 declare function sqliteEngine(options: SqliteEngineOptions): SqliteEngine;
 interface ProposedWrite {

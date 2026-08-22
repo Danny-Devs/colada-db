@@ -4,6 +4,7 @@ import { memoryEngine } from "./memory";
 import { createEntityStore } from "../store";
 import { enablePersistence } from "../persist";
 import {
+  applyCacheSize,
   initSchema,
   loadAllRows,
   loadManyRows,
@@ -135,6 +136,69 @@ describe("sqliteEngine lifecycle", () => {
     expect(terminated).toBe(true);
     await openPromise;
   });
+
+  // DAN-926 / ADR-022 line 5. The app bundles `colada-db/sqlite-worker`
+  // itself, so the two sides of this protocol can skew. A worker that
+  // silently ignores `cacheSize` would hand the caller the exact cliff the
+  // option exists to avoid, so "unknown" must never round to "applied".
+  it("forwards cacheSize on the open op and reports what the worker read BACK", async () => {
+    const { sqliteEngine } = await import("./sqlite");
+
+    let openArgs: unknown;
+    const worker = {
+      onmessage: null as ((e: { data: unknown }) => void) | null,
+      onerror: null as unknown,
+      postMessage(msg: { id: number; op: string; args?: unknown }) {
+        if (msg.op !== "open") return;
+        openArgs = msg.args;
+        queueMicrotask(() =>
+          // Deliberately NOT the requested value: the engine must report
+          // the connection's answer, not echo the request.
+          this.onmessage?.({
+            data: { id: msg.id, ok: true, result: { persistent: true, cacheSize: -8192 } },
+          }),
+        );
+      },
+      terminate() {},
+    };
+
+    const engine = sqliteEngine({
+      worker: worker as unknown as Worker,
+      cacheSize: -262144,
+    });
+    expect(engine.cacheSize).toBeNull(); // unknown before open()
+
+    await engine.open();
+    expect(openArgs).toMatchObject({ cacheSize: -262144 });
+    expect(engine.cacheSize).toBe(-8192);
+  });
+
+  it("reports null when an older worker omits cacheSize from its open reply", async () => {
+    const { sqliteEngine } = await import("./sqlite");
+
+    const oldWorker = {
+      onmessage: null as ((e: { data: unknown }) => void) | null,
+      onerror: null as unknown,
+      postMessage(msg: { id: number; op: string }) {
+        if (msg.op !== "open") return;
+        queueMicrotask(() =>
+          // A pre-DAN-926 worker: it answers `open`, but knows nothing
+          // about cacheSize and drops the field.
+          this.onmessage?.({ data: { id: msg.id, ok: true, result: { persistent: true } } }),
+        );
+      },
+      terminate() {},
+    };
+
+    const engine = sqliteEngine({
+      worker: oldWorker as unknown as Worker,
+      cacheSize: -262144,
+    });
+    await engine.open();
+
+    expect(engine.persistent).toBe(true); // the rest of open() still worked
+    expect(engine.cacheSize).toBeNull(); // ...but the pragma was NEVER confirmed
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -177,6 +241,41 @@ describe.skipIf(sqliteDb === null)("sqlite-core (real sqlite-wasm, :memory:)", (
   it("schema init is idempotent", () => {
     initSchema(sqliteDb!);
     initSchema(sqliteDb!);
+  });
+
+  // DAN-926. `cache_size` is per-CONNECTION and is not stored in the file,
+  // so the only way to know what a connection is running on is to ask it.
+  it("applyCacheSize reads the effective value back FROM the connection", () => {
+    const db = sqliteDb!;
+
+    // No argument: leave the build default alone and only report it.
+    const dflt = applyCacheSize(db);
+    expect(typeof dflt).toBe("number");
+
+    // Negative = KiB. Asserting the RETURN value alone would pass against an
+    // implementation that echoed its own argument, so each case is confirmed
+    // by a second, argument-less read of the same connection.
+    expect(applyCacheSize(db, -262144)).toBe(-262144);
+    expect(applyCacheSize(db)).toBe(-262144);
+
+    // Positive = pages — the other half of SQLite's sign convention.
+    expect(applyCacheSize(db, 4000)).toBe(4000);
+    expect(applyCacheSize(db)).toBe(4000);
+
+    applyCacheSize(db, dflt!); // restore for the tests that follow
+  });
+
+  it("applyCacheSize refuses a non-integer rather than interpolating it into SQL", () => {
+    const db = sqliteDb!;
+    const before = applyCacheSize(db);
+
+    expect(() => applyCacheSize(db, 1.5)).toThrow(/integer/);
+    expect(() => applyCacheSize(db, Number.NaN)).toThrow(/integer/);
+    expect(() => applyCacheSize(db, Number.POSITIVE_INFINITY)).toThrow(/integer/);
+
+    // The refusal must happen BEFORE the exec, or a rejected value would
+    // still have moved the connection.
+    expect(applyCacheSize(db)).toBe(before);
   });
 
   it("round-trips entities with JSON encoding and row_version bookkeeping", () => {

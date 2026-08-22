@@ -77,3 +77,22 @@ test("a fresh profile reads nothing — the suite can observe absence", async ({
   expect(after.ids).toEqual([]);
   expect(after.title).toBeUndefined();
 });
+
+test("cacheSize travels the worker protocol and reads back off the real OPFS connection", async ({
+  page,
+}) => {
+  // No option — the build default stands, and is REPORTED rather than guessed.
+  const dflt = await page.evaluate(() => window.__cdb.sqlite.cacheProbe());
+  expect(dflt.persistent, "engine must be on real OPFS, not the in-memory fallback").toBe(true);
+  expect(typeof dflt.cacheSize).toBe("number");
+
+  // Explicitly set. Negative = KiB; this is the value a vec0 corpus needs and
+  // the entire reason the dial exists (ADR-027, DAN-926).
+  const tuned = await page.evaluate(() => window.__cdb.sqlite.cacheProbe(-262144));
+  expect(tuned.persistent, "engine must be on real OPFS, not the in-memory fallback").toBe(true);
+  expect(tuned.cacheSize).toBe(-262144);
+
+  // Both sides of the boundary. Without this the test would pass against an
+  // engine that ignored the option and reported the same default twice.
+  expect(tuned.cacheSize).not.toBe(dflt.cacheSize);
+});

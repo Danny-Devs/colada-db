@@ -26,6 +26,54 @@ export interface SqliteDb {
   close(): void;
 }
 
+/**
+ * Apply and READ BACK `PRAGMA cache_size` on this connection (DAN-926).
+ *
+ * `cache_size` is a per-CONNECTION setting. Unlike `page_size` it is not
+ * stored in the database file, so it must be set on every open or the
+ * connection silently runs on the build default — measured `-16384`
+ * (16 MiB) at `page_size` 8192 on `@sqlite.org/sqlite-wasm` 3.53.0.
+ *
+ * The return value is read back FROM the connection rather than echoed
+ * from the argument, and that distinction is the point: SQLite is free to
+ * clamp or reinterpret the value, and an echo would report a setting that
+ * was never confirmed. The benchmark that motivated this option was itself
+ * corrupted once by assuming a pragma held (`cache_size` persisted across
+ * cases, so the control arm was not a control).
+ *
+ * @param cacheSize SQLite's own convention, passed through unchanged:
+ *   NEGATIVE = KiB of memory, POSITIVE = number of pages. Omit to leave
+ *   the current setting alone and only report it.
+ * @returns the effective `cache_size`, or `null` if the connection
+ *   reported none.
+ */
+export function applyCacheSize(db: SqliteDb, cacheSize?: number): number | null {
+  if (cacheSize !== undefined) {
+    // PRAGMA statements take no bind parameters, so the value is
+    // interpolated into the SQL text. Validating it to an integer FIRST is
+    // what makes that safe; it also refuses a fractional value that SQLite
+    // would otherwise truncate without complaint.
+    if (!Number.isInteger(cacheSize)) {
+      throw new Error(
+        `sqliteEngine: cacheSize must be an integer (negative = KiB, positive = pages), got ${cacheSize}`,
+      );
+    }
+    db.exec({ sql: `PRAGMA cache_size=${cacheSize}` });
+  }
+
+  const read: unknown[] = [];
+  db.exec({
+    sql: "PRAGMA cache_size",
+    rowMode: "array",
+    callback: (row: unknown[]) => {
+      read.push(row[0]);
+    },
+  });
+  if (read.length === 0) return null;
+  const effective = Number(read[0]);
+  return Number.isFinite(effective) ? effective : null;
+}
+
 export function initSchema(db: SqliteDb): void {
   db.exec({
     sql: `CREATE TABLE IF NOT EXISTS entities (

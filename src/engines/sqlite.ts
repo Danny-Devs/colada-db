@@ -42,6 +42,32 @@ export interface SqliteEngineOptions {
   worker: Worker | (() => Worker);
   /** Database file name inside OPFS. @default 'cdb_entities.sqlite3' */
   dbName?: string;
+  /**
+   * Page cache for this connection, applied at open as `PRAGMA cache_size`,
+   * in SQLite's own sign convention passed through unchanged:
+   * **negative = KiB of memory, positive = number of pages.**
+   *
+   * @default undefined — the build default is left in place (measured
+   * `-16384`, i.e. 16 MiB, on `@sqlite.org/sqlite-wasm` 3.53.0).
+   *
+   * ⚠️ **Raise this deliberately, not reflexively.** The cache is real
+   * memory held for as long as the connection is open — on a phone, in a
+   * tab. For the JSON entity table this engine ships, the default has not
+   * been measured to be a problem.
+   *
+   * Where it becomes load-bearing is a **vector corpus** (`vec0`) sharing
+   * the connection: a KNN scan revisits pages, so once the working set
+   * outgrows the cache *every* query thrashes rather than just the first.
+   * Measured at 384 dimensions in Chromium, p95 at 100,000 vectors was
+   * 1731 ms on the default against 29 ms at `-262144` — a **59×** penalty
+   * that appears between 10,000 and 25,000 vectors, two corpus sizes a
+   * developer would reasonably consider adjacent. Any deployment
+   * persisting more than ~10,000 vectors must set this explicitly.
+   *
+   * Read {@link SqliteEngine.cacheSize} after `open()` to confirm what the
+   * connection actually applied. Never assume this value took.
+   */
+  cacheSize?: number;
 }
 
 export interface SqliteEngine extends StorageEngine {
@@ -50,14 +76,28 @@ export interface SqliteEngine extends StorageEngine {
    * to a transient in-memory DB (false). `null` until `open()` resolves.
    */
   readonly persistent: boolean | null;
+  /**
+   * `PRAGMA cache_size` as read back FROM the connection after `open()`,
+   * in SQLite's own units (negative = KiB, positive = pages).
+   *
+   * `null` until `open()` resolves — and still `null` afterwards if the
+   * worker reported none, which is how an app bundling an **older**
+   * `colada-db/sqlite-worker` than its `colada-db` shows up. The two sides
+   * cross a process boundary and are not ours to upgrade together
+   * (ADR-022 line 5), so a requested {@link SqliteEngineOptions.cacheSize}
+   * that reads back `null` means the pragma was never confirmed applied.
+   * Treat that as unknown, never as set.
+   */
+  readonly cacheSize: number | null;
 }
 
 export function sqliteEngine(options: SqliteEngineOptions): SqliteEngine {
-  const { worker: workerOrFactory, dbName = "cdb_entities.sqlite3" } = options;
+  const { worker: workerOrFactory, dbName = "cdb_entities.sqlite3", cacheSize } = options;
 
   let worker: Worker | null = null;
   let nextId = 1;
   let persistent: boolean | null = null;
+  let effectiveCacheSize: number | null = null;
   const pending = new Map<
     number,
     { resolve: (value: unknown) => void; reject: (err: Error) => void }
@@ -96,14 +136,24 @@ export function sqliteEngine(options: SqliteEngineOptions): SqliteEngine {
       return persistent;
     },
 
+    get cacheSize() {
+      return effectiveCacheSize;
+    },
+
     isSupported() {
       return typeof Worker !== "undefined";
     },
 
     async open() {
       attach(typeof workerOrFactory === "function" ? workerOrFactory() : workerOrFactory);
-      const info = await call<{ persistent: boolean }>("open", { dbName });
+      const info = await call<{ persistent: boolean; cacheSize?: number | null }>("open", {
+        dbName,
+        cacheSize,
+      });
       persistent = info.persistent;
+      // `?? null` rather than a default: an older worker omits the field
+      // entirely, and reporting "unknown" is the only honest answer there.
+      effectiveCacheSize = info.cacheSize ?? null;
       if (
         !info.persistent &&
         typeof process !== "undefined" &&
