@@ -62,6 +62,7 @@ with anything below:
 | forward migration yes, backward no | `knowledge/schema-migration-and-rolling-upgrade-2026-08-21.md` |
 | a wrapped batch rolls back completely, an unwrapped one does not | `knowledge/transactional-batch-apply-2026-08-21.md` |
 | Safari works; the `-O0` correctness defect was the real finding | `knowledge/webkit-and-the-O0-defect-2026-08-21.md` |
+| the value tiebreak is the type CLASS first, reverse of SQLite's | `knowledge/value-tiebreak-is-the-type-class-2026-08-21.md` |
 
 ### ⚠️ One correction the corpus contains and a reader will otherwise miss
 
@@ -111,10 +112,22 @@ claims, each measured:
    source that cannot compile for its own target demonstrates it* — and unlike a push date, that
    does not reverse when someone commits a README fix.
 
-2. **Adopting a `crr` table adopts delete-wins whether or not anyone chose it.** A concurrent update
-   is discarded against a delete with **no conflict surfaced**. Recoverable — but the user is never
-   told there is anything to recover. This is a **design property, not a defect**: there is no
-   upstream fix that removes it while leaving cr-sqlite what it is.
+2. **Adopting a `crr` table adopts a merge semantic whether or not anyone chose it.** Two measured
+   instances of the same shape:
+
+   **Delete-wins.** A concurrent update is discarded against a delete with **no conflict surfaced**.
+   Recoverable — a re-insert beats a held delete in every order, including on a replica that already
+   applied the delete — but the user is never told there is anything to recover.
+
+   **The value tiebreak.** When `cl` and `col_version` both tie, the winner is decided by the
+   **storage class** of what each peer wrote: measured `NULL < BLOB < TEXT < REAL < INTEGER`, which
+   is the reverse of SQLite's own order except for NULL, with `int 2` beating `real 2.5` — a result
+   no numeric, lexicographic or bytewise rule produces. On a loosely-typed column, which is SQLite's
+   **default**, a field holding `42` on one device and `"42"` on another resolves to the INTEGER by
+   class, regardless of which was authored later.
+
+   Both are **design properties, not defects**: there is no upstream fix that removes them while
+   leaving cr-sqlite what it is. That is what makes this claim the load-bearing one below.
 
 3. **Two of the failure modes are silent at exactly the wrong distance.** `alter-guard-…` measured
    that `DROP COLUMN` throws at the `ALTER` itself (caught in dev), `ADD COLUMN` throws only when
