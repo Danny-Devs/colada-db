@@ -2,7 +2,7 @@
 title:       colada-db failure log
 kind:        lessons
 status:      active
-updated:     2026-08-02
+updated:     2026-08-21
 owner:       danny
 verified_by: "N/A — narrative"
 ---
@@ -921,3 +921,53 @@ literally re-ask "does this apply to the other branch(es) too?" the moment a fix
 before moving on. And self-review is not a substitute for a second, differently-contexted reader:
 the reviewer that caught this had no attachment to the original design reasoning and was reading
 the diff cold against the spec, not against the author's own mental model of what the code does.
+
+## [2026-08-21] — a Promise wrapping an event API settled on two of three terminal events, and the uncovered one was the rare one
+
+**Mistake:** all three IndexedDB transactions in `src/engines/idb.ts` (`loadAll`,
+`loadMany`, `writeBatch`) wired `tx.oncomplete` and `tx.onerror` but not
+`tx.onabort`. An IDB transaction has **three** terminal events, and `abort` is
+not always preceded by `error`: a request-level failure (QuotaExceeded, a
+constraint violation) bubbles to `error`, but a commit-phase failure, a bfcache
+freeze, or an explicit `tx.abort()` fires `abort` alone. On that third path the
+returned Promise never settled at all.
+
+**Why it happened:** the wrapper was written against the events that fire in
+testing. `complete` is the happy path and `error` is the one an author
+deliberately provokes, so a two-of-three wrapper looks complete under every test
+anyone thinks to write — the uncovered event is uncovered precisely because it is
+hard to provoke. Nothing in the type system flags it either: `IDBTransaction`
+exposes all three handlers as optional, so wiring two is indistinguishable from
+wiring three to the compiler.
+
+The severity was also easy to under-read. The symptom is not a lost write, it is
+a Promise that stays pending, which sounds mild — and then it compounds:
+`flushing` stays `true`, every later `flush()` awaits the same pending promise,
+and `dispose()`'s final flush hangs with them. **A liveness bug in a
+write-behind pipeline lands at shutdown, which is the moment durability is
+actually decided.**
+
+There was a second trap inside the fix. On an abort with no request error,
+`tx.error` is **null** — so copying the `reject(tx.error)` idiom from the
+neighbouring line would have produced a rejection carrying no diagnosis, turning
+a hang into a mystery.
+
+**Fix:** all three transactions now wire `tx.onabort`, rejecting with `tx.error`
+when present and a named `Error` naming the method when it is not.
+`src/idb-abort.spec.ts` drives an `IDBFactory` whose transactions fire only
+`abort`, and asserts each method **settles** by racing it against a timer — the
+control was watched to fail, all five cases returning the `HUNG` sentinel with
+the handlers removed. An `**Architecture Invariant:**` marker at the top of
+`idb.ts` states the three-terminal-events rule so the next transaction added to
+that file inherits it. The DoR gate asserts `tx.onabort` by **counting** against
+`tx.oncomplete` rather than by existence, so wiring one of three cannot pass.
+
+**For future agents:** when wrapping any event-based API in a Promise, **list
+the API's terminal events from its specification, not from the ones you have
+seen fire, and prove every one of them settles.** `abort` vs `error` on an IDB
+transaction is one instance of a family — `close` vs `error` on a WebSocket,
+`exit` vs `error` on a child process, `abort` vs `error` on an XHR. In each pair
+the rare event is the one that hangs the caller forever, and "all tests pass" is
+not evidence about a path no test can reach. Then check what the rejection
+*carries*: the error field an event API exposes is frequently null on exactly
+the branch you just added.

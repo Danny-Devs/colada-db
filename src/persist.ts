@@ -217,6 +217,18 @@ export async function requestDurableStorage(): Promise<boolean> {
  * nor page a stale engine row over an EVICTED optimistic put mid-transaction.
  * See `docs/design/optimistic-durability.md`.
  *
+ * **Multi-tab (known limitation): last-writer-wins.** Tabs do not observe
+ * each other's writes. Each tab holds its own in-memory projection and its
+ * own write-behind pipeline, with no leader election and no cross-tab bus,
+ * so two tabs editing the same entity diverge permanently in memory and
+ * whichever flushes last wins on disk. Secondary tabs may also lose SQLite
+ * durability: only one connection may hold an OPFS database, so a second
+ * tab's worker falls back to `:memory:` and reports `persistent: false`
+ * (it keeps working; it stops being durable). Cross-tab coherence arrives
+ * with Stage-3 sync (ADR-006). Note that IndexedDB's `onblocked` /
+ * `onversionchange` do NOT provide this — they only keep a schema UPGRADE
+ * from deadlocking across tabs.
+ *
  * @example
  * ```typescript
  * import { useEntityStore, enablePersistence, sqliteEngine } from 'colada-db'

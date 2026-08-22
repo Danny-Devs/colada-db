@@ -2,8 +2,22 @@
  * IndexedDB storage engine — the default durability substrate.
  *
  * Extracted from the original enablePersistence internals (0.1.6). Raw IDB
- * API, zero dependencies, graceful multi-tab behavior via onblocked /
- * onversionchange.
+ * API, zero dependencies.
+ *
+ * `onblocked` / `onversionchange` keep schema UPGRADES from deadlocking
+ * across tabs — that is their entire scope. They do NOT make concurrent
+ * writes coherent: two tabs are last-writer-wins and never observe each
+ * other's writes. See the multi-tab known-limitation note on
+ * `enablePersistence` and README § Multi-tab.
+ *
+ * **Architecture Invariant:** every transaction wired here settles its
+ * Promise on all THREE terminal events — `complete`, `error` AND `abort`.
+ * `abort` is not always preceded by `error`: a request-level failure fires
+ * `error`, but a commit-phase failure, a bfcache freeze or an explicit
+ * `tx.abort()` fires ONLY `abort`. A transaction wired to two of the three
+ * leaves its Promise forever pending, which wedges the write-behind
+ * pipeline (`flushing` stays true, every later flush awaits it, and
+ * `dispose()`'s final flush hangs with it).
  */
 
 import type { EntityKey, StorageEngine } from "../types";
@@ -114,6 +128,11 @@ export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
           resolve(rows);
         };
         tx.onerror = () => reject(tx.error);
+        tx.onabort = () =>
+          reject(
+            tx.error ??
+              new Error("IDB transaction aborted during loadAll (no request-level error)"),
+          );
       });
     },
 
@@ -133,6 +152,11 @@ export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
         }
         tx.oncomplete = () => resolve(rows);
         tx.onerror = () => reject(tx.error);
+        tx.onabort = () =>
+          reject(
+            tx.error ??
+              new Error("IDB transaction aborted during loadMany (no request-level error)"),
+          );
       });
     },
 
@@ -153,6 +177,11 @@ export function idbEngine(options: IdbEngineOptions = {}): StorageEngine {
         }
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
+        tx.onabort = () =>
+          reject(
+            tx.error ??
+              new Error("IDB transaction aborted during writeBatch (no request-level error)"),
+          );
       });
     },
 

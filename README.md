@@ -93,6 +93,25 @@ Each definition must be able to *recognize* its own records: definitions are tri
 - **Server-authoritative sync — specified, not yet shipped.** The three-method `SyncAdapter` contract (pull/push/subscribe) is designed and frozen on paper, battle-tested on paper against seven production sync systems, and deliberately CRDT-free. **No adapter ships in this release and nothing sync-related is exported yet** — ADR-006 is still `Proposed`, with implementation scheduled for Stage 3. It is listed here because the durability layer was built to accept it, not because you can call it today. (ADR-005, ADR-006)
 - **One reactive graph.** Built on `@vue/reactivity` (standalone — no Vue runtime dependency). Framework adapters share the engine's reactivity instead of shimming a second signal system into it.
 
+### Multi-tab
+
+**Known limitation: two tabs are last-writer-wins, and tabs do not observe each other's writes.**
+
+Each tab keeps its own in-memory projection and its own write-behind pipeline. Nothing propagates
+a committed write from one tab to another — no leader election, no `BroadcastChannel` bus. Two tabs
+editing the same entity will diverge permanently in memory, and whichever tab flushes last wins on
+disk. This is expected for an uncoordinated local-first store before sync; cross-tab coherence
+arrives with Stage-3 sync (ADR-006), not before.
+
+Two further consequences worth stating plainly:
+
+- **Secondary tabs may lose SQLite durability.** Only one connection may hold an OPFS database. A
+  second tab spawning a SQLite worker on the same file does not corrupt it — it falls back to
+  `:memory:` and reports `persistent: false` with a warning. That tab keeps working and stops
+  being durable. (ADR-003)
+- **`onblocked` / `onversionchange` are not multi-tab write coherence.** They keep a schema
+  *upgrade* from deadlocking across tabs. That is their entire scope.
+
 ## The agent surface (`packages/mcp`)
 
 > **Not separately published yet.** `colada-db-mcp` lives in this repository and is exercised by its own test suite and observe-run, but it is not on npm — `npm install colada-db-mcp` will not resolve. Everything below describes code you can read and run from the repo today, not a package you can install.

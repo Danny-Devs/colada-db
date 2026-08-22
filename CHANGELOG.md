@@ -10,6 +10,17 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **The multi-tab known limitation is documented, in both places a reader might look (DAN-651
+  D3).** Two tabs are last-writer-wins and never observe each other's writes: each holds its own
+  in-memory projection and its own write-behind pipeline, with no leader election and no
+  cross-tab bus, so they diverge permanently in memory and whichever flushes last wins on disk.
+  Expected for an uncoordinated local-first store before sync, but previously written down
+  nowhere. Now stated in the `enablePersistence` docstring (the API-surface audience) and under
+  README § Multi-tab (the evaluating-the-library audience), including the second-order
+  consequence that a secondary tab's SQLite worker falls back to `:memory:` and reports
+  `persistent: false` — it keeps working and stops being durable. Cross-tab coherence arrives
+  with Stage-3 sync (ADR-006).
+
 - **The durable outbox (ADR-006 §1) and the pull-apply sibling replay — the two deliberate
   deferrals from DAN-776's landing review, closed (DAN-777).**
 
@@ -513,6 +524,28 @@ than this file's older `[feat]`/`[fix]` tags.
   lines 3 and 6 going live.
 
 ### Fixed
+
+- **An IndexedDB transaction that aborts without a request-level error no longer wedges the
+  write-behind pipeline (DAN-651 P3).** An IDB transaction has three terminal events —
+  `complete`, `error` and `abort` — and `abort` is not always preceded by `error`. A request
+  level failure (QuotaExceeded, a constraint violation) bubbles to `error`, which was handled;
+  a commit-phase failure, a bfcache freeze or an explicit `tx.abort()` fires ONLY `abort`, which
+  was not. All three transactions in `idbEngine` (`loadAll`, `loadMany`, `writeBatch`) were wired
+  to two of the three events, so on that third path the returned Promise never settled. The
+  consequence was liveness, not loss, and it escaped into shutdown: `flushing` stayed true, every
+  later `flush()` awaited the same forever-pending promise, and `dispose()`'s final flush hung
+  with them — so the wedge landed exactly at the moment durability is decided. All three now
+  wire `tx.onabort`. Note the trap inside the fix: on an abort with no request error `tx.error`
+  is **null**, so copying the neighbouring `reject(tx.error)` idiom would have rejected with a
+  value carrying no diagnosis; each handler falls back to a named `Error` and passes `tx.error`
+  through when it is present. Pinned by `src/idb-abort.spec.ts`, watched to fail without the fix
+  (all five cases return the `HUNG` sentinel).
+
+- **`idb.ts`'s header no longer overclaims multi-tab safety (DAN-651 D3).** It advertised
+  "graceful multi-tab behavior via onblocked / onversionchange". Those two handlers keep a schema
+  UPGRADE from deadlocking across tabs and do nothing whatsoever for write coherence — the header
+  invited exactly the wrong conclusion on the one question a reader opens that file asking. It now
+  states the scope of those handlers and points at the known-limitation note.
 
 - **The persisted-format stamp did not reach the common case (ADR-018, ADR-022
   line 1).** `formatVersion` is the only escape hatch the on-disk format has,
