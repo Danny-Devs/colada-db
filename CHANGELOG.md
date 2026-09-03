@@ -10,6 +10,29 @@ than this file's older `[feat]`/`[fix]` tags.
 
 ### Added
 
+- **Two private workspace packages scaffold the sync story and the React seat (DAN-1044,
+  DAN-1047).** `packages/sync-demo` is a Vite + React page with two colada-db clients side by
+  side — each its own `createEntityStore()`, its own engine (`memory` / `idb` / `sqlite-OPFS`,
+  switchable per pane, every label saying what it honestly does), its own `enableSync` — both
+  syncing through one in-page, in-memory, server-authoritative hub that implements `SyncAdapter`
+  directly and is run through `runSyncAdapterContract` with every hook supplied (zero skipped
+  blocks). A labeled `network: on/off` toggle per pane parks that pane's pushes and pulls,
+  shows the outbox count climbing, and drains on reconnect. The page banner and README name
+  what it does NOT do: no backend, no network, in-page transport only, no durable outbox, and
+  ADR-023's server kit + reference server still open. `pnpm --filter @colada-db/sync-demo
+  build` emits a static `dist/`; deploying is a human decision.
+  `packages/react` (`@colada-db/react`, private per ADR-008 §4) ships `useStoreVersion`
+  (implemented — a primitive snapshot over the boundary's global tier) and `useEntity` /
+  `useEntities` as documented stubs that throw: their JSDoc states the contract (which
+  subscribe tier, what the snapshot is, the `useSyncExternalStore` referential-identity law
+  that `getEntities()`'s fresh-array-per-call violates) and README §Snapshot identity lays out
+  the two candidate fixes without choosing. Its spec is real, not `todo`: 3 green for
+  `useStoreVersion`, 7 red against the stubs by design — Danny's work order for DAN-1047, so
+  `pnpm -r test` is red on this branch until the hooks land. Both packages resolve
+  `enableSync`, the sync types and the conformance kit through a `@core/*` source alias
+  because those are deliberately off the public entry (ADR-022 lines 1-2); the root's publish
+  surface, API report and pack manifest are unchanged.
+
 - **The durable outbox (ADR-006 §1) and the pull-apply sibling replay — the two deliberate
   deferrals from DAN-776's landing review, closed (DAN-777).**
 

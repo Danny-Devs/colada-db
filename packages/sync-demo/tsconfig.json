@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    // Everything resolves to SOURCE (mirrors vite.config.ts / vitest.config.ts
+    // aliases) so typecheck and build are green on a clean tree, before any
+    // dist exists — the packages/mcp idiom.
+    //
+    // `@core/*` is the honest seam: `enableSync`, the SyncAdapter types and
+    // the conformance kit are NOT on colada-db's public entry (ADR-022 lines
+    // 1-2). This demo consumes unpublished internals, and says so.
+    "paths": {
+      "colada-db": ["../../src/index.ts"],
+      "@core/*": ["../../src/*"],
+      "@colada-db/react": ["../react/src/index.ts"]
+    },
+    "types": ["vite/client", "vitest/globals"]
+  },
+  "include": ["src/**/*"]
+}
