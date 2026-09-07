@@ -15,17 +15,25 @@ import { createEntityStore } from "./store";
  *     gets weakened until it asserts nothing. Timings live in `bench/` behind
  *     `pnpm bench`, are reported with median and spread, and gate nothing.
  *
- * The quantity under test is the number of entity refs the reactive projection
- * from `getByType()` touches. That is the P1 scaling class: `getByType()`
- * rebuilds its array by walking the whole type map, so anything that
- * invalidates it more often than necessary is O(n) work per invalidation.
+ * The quantity under test is INVALIDATION COST of the reactive projection from
+ * `getByType()`: how many times it rebuilds, times how many entities each
+ * rebuild produces. That is the P1 scaling class: `getByType()` rebuilds its
+ * array by walking the whole type map, so anything that invalidates it more
+ * often than necessary is O(n) work per invalidation.
  *
- * A "visit" below = one entity element read while rebuilding the projection.
+ * A "visit" below = one entity in the projection's OUTPUT for one rebuild
+ * (`recomputes × output length`). It is observed from outside the store, so it
+ * catches the failure this file exists for — invalidating too often, the
+ * O(n^2) shape — and it does NOT see work hidden inside one rebuild: a
+ * redundant second traversal of the type map that produces the same output
+ * leaves `visits` unchanged. Counting reads at the source would require
+ * test-only instrumentation in shipped code, which this repo does not do; the
+ * inner cost of a single rebuild is what `bench/` measures in time.
  *
  * @see bench/README.md for the measured figures and how to reproduce them.
  */
 
-/** Attach a live subscriber and count projection rebuilds + entities visited. */
+/** Attach a live subscriber; count rebuilds, and output entities per rebuild (see the header for what this can and cannot see). */
 function watchProjection(view: { value: readonly unknown[] }) {
   const counts = { recomputes: 0, visits: 0 };
   effect(() => {

@@ -42,7 +42,7 @@ describe("write 1000 entities with a live getByType subscriber", () => {
 // BASELINE: structuredClone of the identical payload. That is the floor cost of
 // merely touching every field once, so the ratio says what normalization costs
 // ABOVE simply walking the data — which is the honest question.
-describe("normalize a 50-post feed (50 posts x 10 comments = 601 entities)", () => {
+describe("normalize a 50-post feed (50 posts x 10 comments = 575 entities)", () => {
   const payload = feedPayload(50, 10);
 
   bench("normalize()", () => {
@@ -55,7 +55,7 @@ describe("normalize a 50-post feed (50 posts x 10 comments = 601 entities)", () 
 });
 
 // ── 3. Normalize + write, the full ingest path ──────────────────────────────
-describe("full ingest: normalize + writeEntitiesToStore (601 entities)", () => {
+describe("full ingest: normalize + writeEntitiesToStore (575 entities)", () => {
   const payload = feedPayload(50, 10);
 
   bench("normalize + writeEntitiesToStore", () => {
@@ -69,14 +69,14 @@ describe("full ingest: normalize + writeEntitiesToStore (601 entities)", () => {
 //
 // An earlier draft of this file compared `store.get()` against `denormalize()`
 // and reported an 8500x gap. That number was DELETED as a strawman: a Map
-// lookup and a full 601-entity tree rebuild are not two ways to do one task,
+// lookup and a full 575-entity tree rebuild are not two ways to do one task,
 // and nobody re-derives a whole response to read one field. It flattered the
 // library and told a reader nothing true.
 //
 // The honest question about the read path is what `denormalize()`'s optional
 // entity cache actually buys, so that is what is measured — the same function,
 // on the same graph, with and without it.
-describe("denormalize a 601-entity response", () => {
+describe("denormalize a 575-entity response", () => {
   const payload = feedPayload(50, 10);
   const store = createEntityStore();
   const { normalized, entities } = normalize(payload, entityDefs, "id");

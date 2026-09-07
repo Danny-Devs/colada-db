@@ -125,7 +125,7 @@ deliberately does not bless the O(n) walk as correct.
 
 ## Finding 3 — normalization costs about what a deep clone costs
 
-Normalizing a 601-entity feed (50 posts × 10 comments, 25 shared authors),
+Normalizing a 575-entity feed (50 posts × 10 comments, 25 shared authors),
 against `structuredClone` of the identical payload — the floor cost of merely
 walking the data and extracting nothing:
 
@@ -138,7 +138,7 @@ walking the data and extracting nothing:
 1.09×, so treat this as *"normalization is approximately free relative to
 touching the payload at all,"* not as a claim that it is faster.
 
-Full ingest, normalize plus `writeEntitiesToStore` for the same 601 entities:
+Full ingest, normalize plus `writeEntitiesToStore` for the same 575 entities:
 **0.494 ms median, 2,027 ops/sec, ±1.15%.**
 
 ---
@@ -146,7 +146,7 @@ Full ingest, normalize plus `writeEntitiesToStore` for the same 601 entities:
 ## Finding 4 — `denormalize()`'s entity cache buys no measurable time
 
 An unflattering result, kept because it is true. The optional cache argument on
-`denormalize()`, on a 601-entity response with 25 shared authors:
+`denormalize()`, on a 575-entity response with 25 shared authors:
 
 | arm | median | ops/sec | spread |
 |---|---:|---:|---:|
@@ -212,7 +212,7 @@ Two figures were removed rather than published, recorded here because the reason
 is reusable:
 
 1. **`store.get()` measured 8,531× faster than `denormalize()`.** A strawman: a
-   Map lookup and a full 601-entity tree rebuild are not two ways of doing one
+   Map lookup and a full 575-entity tree rebuild are not two ways of doing one
    task. No consumer re-derives a whole response to read one field. Deleted.
 2. **The fan-out gap first read 3.96×.** The naive arm was constructing 40
    payloads *inside* the timed region while the normalized arm constructed one,

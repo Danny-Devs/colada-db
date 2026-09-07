@@ -4,8 +4,9 @@
 
 ### Added
 
-- **Performance measurement, split into a gate and a receipt (DAN-935).** Two kinds of number,
-  kept apart on purpose.
+- **Added deterministic performance-count pins that fail a pull request when the `getByType()`
+  projection rebuilds, or visits, more than it should — and non-gating timing benchmarks with
+  published receipts (DAN-935).** Two kinds of number, kept apart on purpose.
 
   `src/perf-pins.spec.ts` runs in the normal test gate and asserts **counts** — how many times
   the `getByType()` reactive projection rebuilds, and how many entities each rebuild visits.
@@ -29,7 +30,7 @@
   API addition and therefore an ADR-022 line-2 decision rather than an agent's call.
 
   Also recorded, because it is true and unflattering: `denormalize()`'s optional entity cache
-  buys 1.01× — no measurable time on a 601-entity response with 25 shared authors.
+  buys 1.01× — no measurable time on a 575-entity response with 25 shared authors.
 
 
 Findings from an independent pre-publish review, run as a fresh reviewer against
