@@ -2,7 +2,7 @@
 title:       "@colada-db/react — React binding scaffold"
 kind:        reference
 status:      draft
-updated:     2026-09-02
+updated:     2026-09-06
 owner:       danny
 verified_by: "pnpm --filter @colada-db/react test"
 ---
@@ -17,9 +17,9 @@ synchronous snapshot getters — the exact shape `useSyncExternalStore` wants �
 so a React binding is a thin layer and imports nothing but the published
 `colada-db` surface. No signal library, no core internals.
 
-One hook is finished. Two are documented stubs whose body is Danny's to write
-(DAN-1047). The tests for the stubs are **red on purpose** — they are the work
-order, already pinned to the contract.
+All three hooks are implemented (DAN-1047). Their tests were written against
+documented stubs before the bodies existed, so the contract was pinned first
+and the implementation had to meet it.
 
 ## Why it is private
 
@@ -43,19 +43,18 @@ import { useStoreVersion, useEntity, useEntities } from "@colada-db/react";
 | Hook | Subscribes via | Snapshot | Status |
 |---|---|---|---|
 | `useStoreVersion(boundary)` | `boundary.subscribe` (global tier) | `boundary.getVersion()` — a number | **implemented** |
-| `useEntity(boundary, type, id)` | `boundary.subscribeEntity` (per-key tier) | `boundary.getEntity(type, id)` — `EntityRecord \| undefined` | **stub, throws** |
-| `useEntities(boundary, type)` | `boundary.subscribeType` (per-type tier) | `boundary.getEntities(type)` — `ReadonlyArray<{ id, data }>` | **stub, throws** |
+| `useEntity(boundary, type, id)` | `boundary.subscribeEntity` (per-key tier) | `boundary.getEntity(type, id)` — `EntityRecord \| undefined` | **implemented** |
+| `useEntities(boundary, type)` | `boundary.subscribeType` (per-type tier) | `boundary.getEntities(type)` — `ReadonlyArray<{ id, data }>` | **implemented** — cached, structurally shared |
 
 `useStoreVersion` is `useSyncExternalStore(boundary.subscribe, boundary.getVersion)`
 with both functions memoized per boundary. Its snapshot is a primitive, so it
-has no identity problem — which is exactly why it could be finished here and
-the other two could not.
+has no identity problem — which is why it was finished first.
 
 Peers: `react >= 18` (when `useSyncExternalStore` landed) and `colada-db`.
 
 ## Snapshot identity
 
-This is the decision the two stubs are waiting on.
+This is the one real decision in the package.
 
 `useSyncExternalStore` calls `getSnapshot` on every render and compares the
 result with `Object.is`. If two calls with **no intervening store change**
@@ -103,15 +102,28 @@ row "unchanged"? By `data` reference is cheap and correct for this store
 
 The two are not exclusive: B's diff can be gated on A's version check.
 
-**Decision: Danny, DAN-1047.** Whichever is chosen must make these three tests
-green without touching them: "(2) referentially stable across re-renders",
-"(2b) a store change produces a new snapshot", and "(1) unsubscribes on
-unmount".
+**Decision (2026-09-06, DAN-1047): B gated on A.** `useEntities` keeps one
+`{ version, snapshot }` per `(boundary, type)` in a module-level
+`WeakMap<StoreBoundary, Map<type, …>>`. While `boundary.getVersion()` is
+unchanged the cached array is returned — a Map lookup, no store access. When
+the version has moved (for this type or any other), the type is recomputed
+via `getEntities()` and diffed against the cached snapshot: rows whose `data`
+reference is unchanged keep their old `EntityEntry` object, and if every row
+survived in the same order the **old array** is returned. So a write to a
+different type costs one O(n) diff on the next read of this type and never a
+new reference. N components on the same type share one snapshot.
+
+`useEntity` needs no cache: `getEntity` returns the store's own record
+reference, and test "(2) same reference" now verifies rather than assumes it.
+
+The three tests the decision had to satisfy — "(2) referentially stable across
+re-renders", "(2b) a store change produces a new snapshot", "(1) unsubscribes
+on unmount" — are green untouched.
 
 ## Running
 
 ```
-pnpm --filter @colada-db/react test       # 3 green (useStoreVersion), 7 red (the stubs) — see index.spec.tsx
+pnpm --filter @colada-db/react test       # 10 green — see index.spec.tsx
 pnpm --filter @colada-db/react typecheck
 pnpm --filter @colada-db/react build      # dist/index.mjs; no .d.ts until the publish decision
 ```

@@ -15,10 +15,9 @@
  * deliberately. Nothing here is on colada-db's public API surface (ADR-022
  * line 2), so nothing here is a compatibility promise yet.
  *
- * `useStoreVersion` is complete. `useEntity` / `useEntities` are DOCUMENTED
- * STUBS — the contract is written in their JSDoc, the tests in
- * `index.spec.tsx` are red against them by design, and the body is Danny's
- * to write (see README §Snapshot identity for the decision it forces).
+ * All three hooks are implemented. `useEntities` carries the one real
+ * decision in this package — snapshot identity — and README §Snapshot
+ * identity records which design was taken and why (DAN-1047).
  */
 import { useCallback, useSyncExternalStore } from "react";
 import type { EntityRecord, StoreBoundary } from "colada-db";
@@ -46,7 +45,10 @@ export function useStoreVersion(boundary: StoreBoundary): number {
   // Memoized per boundary: `useSyncExternalStore` resubscribes whenever the
   // `subscribe` function identity changes, and a fresh closure per render
   // would tear the subscription down and up on every commit.
-  const subscribe = useCallback((listener: () => void) => boundary.subscribe(listener), [boundary]);
+  const subscribe = useCallback(
+    (listener: () => void) => boundary.subscribe(listener),
+    [boundary],
+  );
   const getVersion = useCallback(() => boundary.getVersion(), [boundary]);
   return useSyncExternalStore(subscribe, getVersion, getVersion);
 }
@@ -54,7 +56,7 @@ export function useStoreVersion(boundary: StoreBoundary): number {
 /**
  * One entity's data, re-rendering only when THAT entity changes.
  *
- * ## Contract (the body is Danny's — DAN-1047)
+ * ## Contract (DAN-1047)
  *
  * - **subscribe:** `boundary.subscribeEntity(entityType, id, listener)` — the
  *   per-key tier, so a change to any other entity does not re-render this
@@ -77,24 +79,33 @@ export function useStoreVersion(boundary: StoreBoundary): number {
  *   getSnapshot should be cached to avoid an infinite loop").
  * - **getServerSnapshot:** pass the same getter — there is no SSR store here,
  *   and a missing third argument throws under hydration.
- *
- * @throws until DAN-1047 lands.
  */
-export function useEntity(_boundary: StoreBoundary, entityType: string, id: string): EntityRecord | undefined {
-  throw new Error(
-    `TODO(Danny): DAN-1047 — write the hook (useEntity(${entityType}, ${id})); see packages/react/README.md §Snapshot identity`,
+export function useEntity(
+  boundary: StoreBoundary,
+  entityType: string,
+  id: string,
+): EntityRecord | undefined {
+  const subscribe = useCallback(
+    (listener: () => void) =>
+      boundary.subscribeEntity(entityType, id, listener),
+    [boundary, entityType, id],
   );
+  const getSnapshot = useCallback(
+    () => boundary.getEntity(entityType, id),
+    [boundary, entityType, id],
+  );
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /**
  * Every entity of one type, re-rendering when any entity of that type
  * changes.
  *
- * ## Contract (the body is Danny's — DAN-1047)
+ * ## Contract (DAN-1047)
  *
  * - **subscribe:** `boundary.subscribeType(entityType, listener)` — the
- *   per-type tier. Memoize on `[boundary, entityType]`; the returned
- *   unsubscribe MUST run on unmount (pinned by the test "unsubscribes from
+ *   per-type tier. Memoized on `[boundary, entityType]`; the returned
+ *   unsubscribe runs on unmount (pinned by the test "unsubscribes from
  *   `subscribeType` on unmount").
  * - **getSnapshot:** returns `ReadonlyArray<EntityEntry>`, the shape of
  *   `boundary.getEntities(entityType)`.
@@ -105,21 +116,85 @@ export function useEntity(_boundary: StoreBoundary, entityType: string, id: stri
  *   value), so returning it directly from `getSnapshot` is the textbook
  *   infinite-loop bug — React sees a different reference each render, treats
  *   the store as changed, re-renders, reads again, sees another new array…
- *   The snapshot therefore has to be CACHED and invalidated only when the
- *   type actually changed. Two candidate designs are laid out in README
- *   §Snapshot identity (a version-keyed memo vs. structural sharing); the
- *   choice is deliberately not made here.
- * - **Do not** "fix" this by reading through `useStoreVersion` and calling
- *   `getEntities()` in render — that works (the demo does it as a stopgap)
- *   but subscribes to the WHOLE store and hands every consumer a fresh
- *   array, which defeats `React.memo` downstream. It is the stopgap, not
- *   the hook.
- * - **getServerSnapshot:** same getter as `getSnapshot`.
  *
- * @throws until DAN-1047 lands.
+ * ## The decision taken: structural sharing, gated on the version
+ *
+ * README §Snapshot identity laid out two designs. This is B gated on A:
+ *
+ * 1. **Version gate (A).** One cache entry per `(boundary, entityType)`,
+ *    keyed by `boundary.getVersion()`. While the version is unchanged the
+ *    cached array is returned without touching the store — the common case,
+ *    every render with no write in between, costs a Map lookup.
+ * 2. **Structural diff (B).** When the version HAS moved — for this type or
+ *    any other, the counter is store-wide — recompute via `getEntities()` and
+ *    diff against the cached snapshot by `id` and by `data` reference. Rows
+ *    whose `data` reference is unchanged keep their old `EntityEntry` object,
+ *    so `React.memo` children keyed on the entry skip; if every row survived
+ *    and the order held, the OLD ARRAY is returned and consumers see no
+ *    change at all. A write to a different type therefore costs one O(n)
+ *    diff on the next read of this type and never a new reference.
+ *
+ * The cache is a module-level `WeakMap<StoreBoundary, Map<type, entry>>`, so
+ * N components reading the same type share ONE snapshot instead of holding N
+ * arrays, and a boundary that is garbage-collected takes its cache with it.
+ * "Unchanged" is by `data` reference, which is correct for this store:
+ * `set` allocates a new record on change and emits no event on a no-op.
+ *
+ * - **getServerSnapshot:** same getter as `getSnapshot`.
  */
-export function useEntities(_boundary: StoreBoundary, entityType: string): ReadonlyArray<EntityEntry> {
-  throw new Error(
-    `TODO(Danny): DAN-1047 — write the hook (useEntities(${entityType})); see packages/react/README.md §Snapshot identity`,
+export function useEntities(boundary: StoreBoundary, entityType: string): ReadonlyArray<EntityEntry> {
+  const subscribe = useCallback(
+    (listener: () => void) => boundary.subscribeType(entityType, listener),
+    [boundary, entityType],
   );
+  const getSnapshot = useCallback(() => readEntitiesCached(boundary, entityType), [boundary, entityType]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+interface TypeSnapshot {
+  version: number;
+  snapshot: ReadonlyArray<EntityEntry>;
+}
+
+/** One cache per boundary, one entry per type — shared by every hook instance. */
+const typeSnapshots = new WeakMap<StoreBoundary, Map<string, TypeSnapshot>>();
+
+function readEntitiesCached(boundary: StoreBoundary, entityType: string): ReadonlyArray<EntityEntry> {
+  let perType = typeSnapshots.get(boundary);
+  if (!perType) {
+    perType = new Map();
+    typeSnapshots.set(boundary, perType);
+  }
+  const version = boundary.getVersion();
+  const cached = perType.get(entityType);
+  if (cached && cached.version === version) return cached.snapshot;
+
+  const fresh = boundary.getEntities(entityType);
+  const snapshot = cached ? shareRows(cached.snapshot, fresh) : fresh;
+  perType.set(entityType, { version, snapshot });
+  return snapshot;
+}
+
+/**
+ * Structural sharing: reuse the previous `EntityEntry` object for every row
+ * whose `data` reference is unchanged, and the previous ARRAY when every row
+ * survived in the same order. Returns `fresh` (with shared rows spliced in)
+ * only when something actually differs.
+ */
+function shareRows(prev: ReadonlyArray<EntityEntry>, fresh: Array<EntityEntry>): ReadonlyArray<EntityEntry> {
+  const prevById = new Map<string, EntityEntry>();
+  for (const row of prev) prevById.set(row.id, row);
+
+  let identical = prev.length === fresh.length;
+  for (let i = 0; i < fresh.length; i++) {
+    const next = fresh[i]!;
+    const before = prevById.get(next.id);
+    if (before && before.data === next.data) {
+      fresh[i] = before;
+      if (identical && prev[i] !== before) identical = false;
+    } else {
+      identical = false;
+    }
+  }
+  return identical ? prev : fresh;
 }

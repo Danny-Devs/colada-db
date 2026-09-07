@@ -1,12 +1,11 @@
 /**
- * The intended contract of every hook in this package, as REAL tests.
+ * The contract of every hook in this package, as REAL tests.
  *
- * `useStoreVersion` is implemented and its tests are green. `useEntity` and
- * `useEntities` are documented stubs (DAN-1047) and their tests are RED BY
- * DESIGN — they are Danny's work order, not a broken suite. The point of
- * writing them against the stubs is that the day the hook body lands, the
- * contract is already pinned: cleanup on unmount, referential stability of
- * the snapshot, and delivery of a second store's writes through sync.
+ * These were written against documented stubs BEFORE the hook bodies existed
+ * (DAN-1047), so the contract was pinned first and the implementation had to
+ * meet it: cleanup on unmount, referential stability of the snapshot, and
+ * delivery of a second store's writes through sync. All three hooks are now
+ * implemented and the suite is green.
  *
  * Rendering uses react-dom/client + React's own `act` (no testing-library —
  * fewer moving parts for a scaffold). `IS_REACT_ACT_ENVIRONMENT` is toggled
@@ -254,9 +253,9 @@ describe("useStoreVersion", () => {
   });
 });
 
-// ── useEntities — RED until DAN-1047 ────────────────────────────────────────
+// ── useEntities ─────────────────────────────────────────────────────────────
 
-describe("useEntities (stub — DAN-1047, red by design)", () => {
+describe("useEntities", () => {
   const snapshots: ReadonlyArray<unknown>[] = [];
   let renders = 0;
 
@@ -331,9 +330,9 @@ describe("useEntities (stub — DAN-1047, red by design)", () => {
   });
 });
 
-// ── useEntity — RED until DAN-1047 ──────────────────────────────────────────
+// ── useEntity ────────────────────────────────────────────────────────────────
 
-describe("useEntity (stub — DAN-1047, red by design)", () => {
+describe("useEntity", () => {
   const snapshots: unknown[] = [];
 
   function One({ boundary, id, tick }: { boundary: StoreBoundary; id: string; tick: number }) {
