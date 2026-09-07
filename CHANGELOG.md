@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Added deterministic performance-count pins that fail a pull request when the `getByType()`
+  projection rebuilds, or visits, more than it should — and non-gating timing benchmarks with
+  published receipts (DAN-935).** Two kinds of number, kept apart on purpose.
+
+  `src/perf-pins.spec.ts` runs in the normal test gate and asserts **counts** — how many times
+  the `getByType()` reactive projection rebuilds, and how many entities each rebuild visits.
+  Counts are deterministic on any machine under any load, so they can fail a pull request
+  honestly. The pins were checked by injecting the exact regression they exist to catch
+  (making `setMany` bump the type version once per entity instead of once per type) and
+  confirming the quadratic canary fires at 4.0× against its 2.5 ceiling.
+
+  `bench/` holds **timings** behind `pnpm bench`, and gates nothing: wall-clock figures are
+  machine-dependent, and a flaky gate gets weakened until it asserts nothing at all. Every arm
+  is paired with a baseline measured on the same data in the same run, and reported with median
+  and spread rather than a best-of-N. `pnpm bench:scaling` prints the deterministic count
+  tables. Figures, environment, and reproduce commands: `bench/README.md`.
+
+  Two findings worth acting on. **Bulk ingest must be batched** — a loop of `set()` calls under
+  a live `getByType()` subscriber is O(n²) where `setMany` is O(n), measured at 800.5× the
+  entity visits at n=1,600 and ≈99× slower in wall-clock at n=1,000. **A single field update
+  costs a full walk of the type map** — exactly n entity visits per update at every size tested,
+  because the projection depends on every entity ref rather than only on the type version. The
+  second is measured and left open: the likely fix is an ids-only projection, which is a public
+  API addition and therefore an ADR-022 line-2 decision rather than an agent's call.
+
+  Also recorded, because it is true and unflattering: `denormalize()`'s optional entity cache
+  buys 1.01× — no measurable time on a 575-entity response with 25 shared authors.
+
+
 Findings from an independent pre-publish review, run as a fresh reviewer against
 ADR-022's six irreversibility lines. Two real defects on the lines themselves,
 both fixed here; the rest are first-run and disclosure gaps. Recorded with the

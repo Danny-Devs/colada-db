@@ -1,7 +1,7 @@
 {
   "name": "colada-db",
   "version": "0.1.0",
-  "description": "AI-first, local-first client database — normalized reactive entity store with pluggable durability engines (IndexedDB, OPFS SQLite)",
+  "description": "AI-first, local-first client database \u2014 normalized reactive entity store with pluggable durability engines (IndexedDB, OPFS SQLite)",
   "keywords": [
     "local-first",
     "database",
@@ -46,6 +46,8 @@
   "scripts": {
     "build": "tsdown && node scripts/check-public-types.mjs",
     "check:api-report": "node scripts/check-api-report.mjs",
+    "bench": "vitest bench --run --config bench/vitest.bench.config.ts",
+    "bench:scaling": "vitest run --config bench/vitest.bench.config.ts",
     "check:pack-manifest": "bash scripts/check-pack-manifest.sh",
     "check:publish-surface": "node scripts/check-publish-surface.mjs",
     "fmt": "oxfmt",
