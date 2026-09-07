@@ -11,14 +11,24 @@
 > root. Framework-agnostic core; adapters consume a two-function subscription
 > boundary; Vue gets a privileged direct-ref path.
 
-Status: pre-release, unpublished. Extracted 2026-07-19 from the shipped
-`pinia-colada-plugin-normalizer` (npm, 0.3.0), which becomes its Vue adapter.
+Status: 0.1.0 on npm (published 2026-08-02, MIT), repo public, CI blocking on
+`main`. Extracted 2026-07-19 from the shipped `pinia-colada-plugin-normalizer`
+(npm, 0.3.0), which becomes its Vue adapter.
 
-What is NOT in this build, stated plainly: no sync. The three-method
-`SyncAdapter` contract is specified (ADR-006, still `Proposed`) and the
-durability layer was built to accept it, but no adapter ships and nothing
-sync-related is exported. `packages/mcp` (the read-only MCP agent surface)
-lives in this repo and runs, but is not published to npm.
+Positioning, in the one sentence that survives inspection: your app's state
+stays on the device; agents get a scoped, gated, attributed window into it —
+never the keys. Every clause maps to shipped code (allowlist · pre-apply policy
+gate · origin tags · zero write tools on the agent surface).
+
+What is NOT in the PUBLISHED build, stated plainly: no sync. On `main` the
+sync layer exists and is reviewed — `enableSync` coordinator
+(src/coordinator.ts), `restAdapter` (src/rest-adapter.ts), wire protocol v1
+(src/wire-protocol.ts, docs/protocol/), durable outbox — but nothing sync-
+related is exported from the package root yet, so `npm install colada-db`
+gets no sync. Exporting it crosses ADR-022 lines 2 and 5 and is a deliberate
+0.2.0 act, preceded by an adversarial review. `packages/mcp` (the read-only
+MCP agent surface) and `packages/react` (the `useSyncExternalStore` binding)
+live in this repo and run, but are not published to npm.
 
 ## Read first
 - AGENTS.md: how to work on this repo — verify commands, extraction chip state, reading order
@@ -39,12 +49,16 @@ lives in this repo and runs, but is not published to npm.
 - history.ts: enableHistory — capped field-level change log with purge-on-remove erasure
 - schema.ts: exportSchema — the entity registry as plain JSON (the MCP resource)
 - transactions.ts also carries the policy gate (useGate, PolicyVetoError)
+- coordinator.ts: enableSync(store, {adapter}) — the server-authoritative sync coordinator (ADR-006 rev d); ON MAIN, NOT EXPORTED
+- rest-adapter.ts · wire-protocol.ts · sync-types.ts · sync-conformance.ts: the reference SyncAdapter, wire protocol v1, the contract kit; same status
 - coalesce.ts: createCoalescer — debounced batch flush shared by persist and matcher views
 - engine-conformance.ts: the shared StorageEngine contract kit every engine is run against
 - types.ts: EntityStore/StorageEngine/EntityEvent contracts, defineEntity, EntityRegistry (module augmentation)
 
 ## Also here
 - packages/mcp: read-only MCP agent surface (ADR-011). ZERO write tools registered; per-type allowlist; results marked untrusted. In-repo, not on npm.
+- packages/react: useStoreVersion / useEntity / useEntities over the adapter boundary (ADR-008 §3). In-repo, private, not on npm.
+- ARCHITECTURE.md: the map — how the subsystems above fit, and the invariants stated as absences.
 
 ## Verify
 CI=true pnpm -r test · pnpm -r typecheck · pnpm -r build · pnpm -r lint (all must be green)
