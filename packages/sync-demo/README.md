@@ -2,7 +2,7 @@
 title:       "sync-demo — the sync story, touchable"
 kind:        howto
 status:      draft
-updated:     2026-09-02
+updated:     2026-09-12
 owner:       danny
 verified_by: "pnpm --filter @colada-db/sync-demo test && pnpm --filter @colada-db/sync-demo build"
 ---
@@ -39,9 +39,13 @@ so in a banner.
   a malformed change, so the reject/revert and remap paths are not shown.
 - **The network toggle parks requests; it does not fail them.** See "How the
   toggle works" below — D9's exponential backoff is not exercised.
-- **Not deployed.** `pnpm --filter @colada-db/sync-demo build` produces a
-  static `dist/` (relative asset paths, `base: "./"`). GitHub Pages is the
-  likely target. Deploying is a human decision; nothing here does it.
+- **No deploy without a word.** `pnpm --filter @colada-db/sync-demo build`
+  produces a static `dist/` (relative asset paths, `base: "./"`).
+  `.github/workflows/deploy-sync-demo.yml` publishes it through GitHub Pages at
+  <https://danny-devs.github.io/colada-db/> on a push to `main` that touches the
+  demo, or on manual dispatch, once the repo's Pages site exists. If that URL
+  returns 404, the site was never created; nothing here creates it, and
+  creating it is a human decision.
 
 ## Running
 
