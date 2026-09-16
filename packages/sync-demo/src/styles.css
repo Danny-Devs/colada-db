@@ -1,0 +1,209 @@
+/* Legible, not designed — a scaffold. Vanilla CSS, dark like playground/. */
+:root {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --panel: #161b22;
+  --line: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #7ee787;
+  --warn: #f0b429;
+  --off: #ff7b72;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.app {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+h1 {
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+  margin: 0 0 0.75rem;
+}
+
+h2 {
+  font-size: 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.accent {
+  color: var(--accent);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.mono {
+  font-family: inherit;
+  color: var(--muted);
+}
+
+.banner {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--warn);
+  background: var(--panel);
+  border-radius: 0 6px 6px 0;
+}
+
+.banner code {
+  color: var(--accent);
+}
+
+.hub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  padding: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.hub .label {
+  color: var(--accent);
+}
+
+.panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 800px) {
+  .panes {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pane {
+  padding: 1rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  min-width: 0;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.controls select {
+  max-width: 100%;
+  font: inherit;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+}
+
+.net {
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  width: fit-content;
+}
+
+.net.on {
+  border-color: var(--accent);
+}
+
+.net.off {
+  border-color: var(--off);
+  color: var(--off);
+}
+
+.status {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 1rem;
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+}
+
+.status dt {
+  color: var(--muted);
+}
+
+.status dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.warn {
+  color: var(--warn);
+}
+
+.add {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+}
+
+button {
+  font: inherit;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+.todos {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.todos li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.todos .id {
+  max-width: 11rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85em;
+}

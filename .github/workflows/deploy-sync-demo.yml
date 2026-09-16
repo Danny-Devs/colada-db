@@ -1,0 +1,72 @@
+name: Deploy sync-demo to GitHub Pages
+
+# E1 (DAN-1044): the sync story, touchable, at a URL a stranger can open.
+# Builds packages/sync-demo (static, `base: "./"`, no COOP/COEP needed because
+# the sqlite engine uses opfs-sahpool) and publishes its dist/ through GitHub
+# Pages' Actions source.
+#
+# The repo's Pages site has to exist once, created with build_type "workflow"
+# (Settings → Pages → Source: GitHub Actions, or
+# `gh api -X POST repos/<owner>/<repo>/pages -f build_type=workflow`). Until it
+# does, this workflow fails at configure-pages, loudly, and deploys nothing.
+# Creating it and merging this file are both publication and stay Danny's.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "packages/sync-demo/**"
+      - "packages/react/**"
+      - "src/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/deploy-sync-demo.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time. A newer push waits for the one in flight instead of
+# cancelling it, which is the pattern GitHub documents for Pages.
+concurrency:
+  group: pages-sync-demo
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Same order as ci.yml: pnpm first so setup-node's cache can find the store.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The demo resolves `colada-db` and `@colada-db/react` to source through
+      # vite aliases, so no root build precedes this.
+      - name: Build the demo
+        run: pnpm --filter @colada-db/sync-demo build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: packages/sync-demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

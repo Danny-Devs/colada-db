@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    // Typecheck against core SOURCE so `pnpm -r typecheck` is green on a
+    // clean tree (dist/ does not exist before `pnpm -r build`). Runtime
+    // resolution still goes through the workspace link to the built dist.
+    // Same idiom as packages/mcp.
+    //
+    // `@core/*` reaches modules that are deliberately NOT on colada-db's
+    // public entry (ADR-022 lines 1-2: `enableSync`, the SyncAdapter types).
+    // Only spec files may use it — the hooks themselves import from the
+    // published surface alone.
+    "paths": {
+      "colada-db": ["../../src/index.ts"],
+      "@core/*": ["../../src/*"]
+    },
+    "types": ["vitest/globals"]
+  },
+  "include": ["src/**/*"]
+}
